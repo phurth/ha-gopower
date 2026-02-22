@@ -343,8 +343,8 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         _LOGGER.info(
             "Reconnecting in %.0fs (attempt %d)", delay, self._reconnect_failures
         )
-        self._reconnect_task = self.hass.async_create_task(
-            self._reconnect_after(delay)
+        self._reconnect_task = self._entry.async_create_background_task(
+            self.hass, self._reconnect_after(delay), "gopower_reconnect"
         )
 
     async def _reconnect_after(self, delay: float) -> None:
@@ -368,7 +368,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def _start_polling(self) -> None:
         """Start the 4-second polling loop."""
         self._stop_polling()
-        self._poll_task = self.hass.async_create_task(self._poll_loop())
+        self._poll_task = self._entry.async_create_background_task(
+            self.hass, self._poll_loop(), "gopower_poll_loop"
+        )
         _LOGGER.info("Polling started (every %.0fs)", POLL_INTERVAL)
 
     def _stop_polling(self) -> None:
@@ -406,7 +408,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def _start_watchdog(self) -> None:
         """Start the connection health watchdog."""
         self._stop_watchdog()
-        self._watchdog_task = self.hass.async_create_task(self._watchdog_loop())
+        self._watchdog_task = self._entry.async_create_background_task(
+            self.hass, self._watchdog_loop(), "gopower_watchdog_loop"
+        )
 
     def _stop_watchdog(self) -> None:
         """Stop watchdog."""

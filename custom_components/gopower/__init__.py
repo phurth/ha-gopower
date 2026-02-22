@@ -26,12 +26,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    try:
-        await coordinator.async_connect()
-    except Exception:  # noqa: BLE001
-        _LOGGER.exception("Failed to connect to GoPower controller")
-
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Connect in the background so we don't block HA startup.
+    # Entities will show "unavailable" until the BLE connection succeeds.
+    async def _bg_connect() -> None:
+        try:
+            await coordinator.async_connect()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to connect to GoPower controller")
+
+    entry.async_create_background_task(hass, _bg_connect(), "gopower_initial_connect")
     return True
 
 
