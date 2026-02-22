@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "GoPower Solar Controller",
+        "description": "Select a discovered GoPower controller or enter its Bluetooth MAC address manually.",
+        "data": {
+          "address": "Bluetooth MAC address"
+        }
+      },
+      "confirm": {
+        "title": "Configure {name}",
+        "description": "A GoPower solar controller was discovered:\n\n**{name}**\n\nDo you want to add it to Home Assistant?"
+      }
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  }
+}
