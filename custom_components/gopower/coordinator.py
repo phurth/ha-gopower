@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from bleak import BleakClient, BleakError, BleakGATTCharacteristic
+from bleak import BleakClient, BleakError, BleakGATTCharacteristic, BleakScanner
 from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
@@ -230,17 +230,56 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         """Try connecting directly via local HCI adapters when proxy is full.
 
         Iterates hci0..hci3 looking for a local adapter that can reach the
-        device.  Returns a connected BleakClient or None.
+        device.  Performs a BLE scan first so BlueZ knows about the device,
+        then connects using the discovered BLEDevice (which carries the
+        correct address type metadata).
+        Returns a connected BleakClient or None.
         """
         for adapter in ("hci0", "hci1", "hci2", "hci3"):
             _LOGGER.info(
-                "Attempting direct BLE connect to %s via %s",
+                "Attempting direct BLE connect to %s via %s (scanning first)",
                 self._address,
                 adapter,
             )
             try:
-                client = BleakClient(
+                # Scan on this adapter to discover the device so BlueZ
+                # populates its device list and we get a proper BLEDevice
+                # with the correct address type (public vs random).
+                ble_device = None
+                scanner = BleakScanner(adapter=adapter)
+                try:
+                    await scanner.start()
+                    await asyncio.sleep(5.0)
+                    await scanner.stop()
+                except (BleakError, OSError) as scan_exc:
+                    _LOGGER.debug(
+                        "Scan on %s failed (adapter may not exist): %s",
+                        adapter,
+                        scan_exc,
+                    )
+                    continue
+
+                for dev in scanner.discovered_devices:
+                    if dev.address.upper() == self._address.upper():
+                        ble_device = dev
+                        break
+
+                if ble_device is None:
+                    _LOGGER.debug(
+                        "Device %s not found in scan on %s",
+                        self._address,
+                        adapter,
+                    )
+                    continue
+
+                _LOGGER.info(
+                    "Found %s on %s (rssi=%s), connecting...",
                     self._address,
+                    adapter,
+                    getattr(ble_device, "rssi", "?"),
+                )
+                client = BleakClient(
+                    ble_device,
                     disconnected_callback=self._on_disconnect,
                     adapter=adapter,
                 )
