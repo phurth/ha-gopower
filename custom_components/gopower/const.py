@@ -1,6 +1,6 @@
 """Constants for the GoPower Solar BLE integration."""
 
-DOMAIN = "ha_gopower"
+DOMAIN = "gopower"
 
 # ---------------------------------------------------------------------------
 # BLE Service & Characteristic UUIDs (standard BT SIG base)

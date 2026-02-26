@@ -1,5 +1,5 @@
 {
-  "domain": "ha_gopower",
+  "domain": "gopower",
   "name": "GoPower Solar",
   "codeowners": [
     "@phurth"
