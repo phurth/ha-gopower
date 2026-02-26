@@ -9,6 +9,7 @@
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/phurth/ha-gopower",
+  "issue_tracker": "https://github.com/phurth/ha-gopower/issues",
   "bluetooth": [
     {
       "local_name": "GP-PWM*"
