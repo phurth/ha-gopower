@@ -2,7 +2,7 @@
   "domain": "gopower",
   "name": "GoPower Solar",
   "codeowners": [
-    "@petehurth"
+    "@phurth"
   ],
   "config_flow": true,
   "dependencies": [
