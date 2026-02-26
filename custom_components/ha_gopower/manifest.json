@@ -1,5 +1,5 @@
 {
-  "domain": "gopower",
+  "domain": "ha_gopower",
   "name": "GoPower Solar",
   "codeowners": [
     "@phurth"
@@ -23,5 +23,5 @@
     "bleak>=0.21.0",
     "bleak-retry-connector>=3.1.0"
   ],
-  "version": "1.0.1"
+  "version": "1.0.2"
 }
