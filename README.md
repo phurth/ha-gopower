@@ -4,6 +4,8 @@ Native BLE integration for **Go Power! PWM solar charge controllers** (GP-PWM se
 
 Connects directly to the controller over Bluetooth Low Energy — no cloud, no MQTT bridge, no internet required.
 
+> **Disclaimer:** This is an independent community integration and is not affiliated with, endorsed by, or supported by Go Power! or any of its affiliates. Use it at your own risk.
+
 ## Features
 
 - **Auto-discovery** via BLE advertisements (service UUID `FFF0` or name prefix `GP-PWM` / `GoPower`)
