@@ -67,7 +67,7 @@ SENSOR_DESCRIPTIONS: tuple[GoPowerSensorDescription, ...] = (
     ),
     GoPowerSensorDescription(
         key="solar_current",
-        name="Solar Current",
+        name="Charge Current",
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
@@ -77,7 +77,7 @@ SENSOR_DESCRIPTIONS: tuple[GoPowerSensorDescription, ...] = (
     ),
     GoPowerSensorDescription(
         key="solar_power",
-        name="Solar Power",
+        name="Charge Power",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,

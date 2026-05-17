@@ -623,12 +623,21 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 return 0
 
         # Raw values in mV/mA — scale to V/A
+        # field[0]  = dcCurrent  (charge current into the battery, mA)
+        # field[2]  = dcVoltage  (battery voltage, mV)
+        # field[11] = pvvoltage  (PV panel open-circuit voltage, mV)
         solar_current_a = _float_field(FIELD_SOLAR_CURRENT) / 1000.0
         battery_voltage_v = _float_field(FIELD_BATTERY_VOLTAGE) / 1000.0
         solar_voltage_v = _float_field(FIELD_SOLAR_VOLTAGE) / 1000.0
 
-        # Derived
-        solar_power_w = solar_voltage_v * solar_current_a
+        # Power calculation uses battery voltage × charge current, not panel
+        # voltage × charge current.  For a PWM controller the panel voltage
+        # (Voc ~18-22 V) is chopped down to battery voltage; the excess is
+        # dissipated as heat in the switching transistor.  What flows into the
+        # battery is battery_voltage × charge_current, which is the useful
+        # energy delivered.  Using pvvoltage here would overstate by ~Vpv/Vbat
+        # (~30 %) and is incorrect for HA energy accounting.
+        solar_power_w = battery_voltage_v * solar_current_a
 
         # Ah → Wh
         amp_hours_today = _int_field(FIELD_AMP_HOURS_TODAY)
