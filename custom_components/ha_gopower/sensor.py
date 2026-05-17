@@ -187,8 +187,11 @@ class GoPowerSensor(
 
     @property
     def available(self) -> bool:
-        """Available when connected and we have data."""
-        return self.coordinator.connected and self.coordinator.state is not None
+        """Available when connected, we have data, and this sensor has a value."""
+        if not self.coordinator.connected or self.coordinator.state is None:
+            return False
+        # Sensors whose value_fn returns None are not provided by this device type
+        return self.entity_description.value_fn(self.coordinator.state) is not None
 
     @property
     def native_value(self) -> float | int | str | None:

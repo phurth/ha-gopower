@@ -79,7 +79,7 @@ _LOGGER = logging.getLogger(__name__)
 class GoPowerState:
     """Parsed state from a GoPower solar controller."""
 
-    solar_voltage: float = 0.0     # V
+    solar_voltage: float | None = None  # V; None when device doesn't report panel voltage
     solar_current: float = 0.0     # A
     solar_power: float = 0.0       # W (calculated)
     battery_voltage: float = 0.0   # V
@@ -578,6 +578,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                     state.temperature_c,
                     state.firmware,
                 )
+                _LOGGER.debug(
+                    "SC raw fields %s: %s",
+                    self._address,
+                    "|".join(f"{i}={v}" for i, v in enumerate(fields[:30])),
+                )
             else:
                 _LOGGER.info(
                     "First data from GoPower %s: battery=%.3fV, solar=%.3fV/%.3fA, "
@@ -694,7 +699,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         )
 
         return GoPowerState(
-            solar_voltage=0.0,       # Not available in SC protocol
+            solar_voltage=None,      # Not reported by SC protocol
             solar_current=round(battery_current_a, 3),
             solar_power=round(solar_power_w, 1),
             battery_voltage=round(battery_voltage_v, 3),
