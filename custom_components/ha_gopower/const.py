@@ -49,7 +49,7 @@ FIELD_SOLAR_VOLTAGE = 11     # mV — divide by 1000 → V
 FIELD_SERIAL = 14             # hex string → int → decimal string
 FIELD_TEMP_C = 16             # signed int (e.g. "+06" or "-05")
 FIELD_TEMP_F = 17             # signed int
-FIELD_AMP_HOURS_TODAY = 19   # Ah — multiply by battery voltage → Wh
+FIELD_AMP_HOURS_TODAY = 19   # Ah×100 (fixed-point) — divide by 100 for Ah, then multiply by battery voltage → Wh; resets daily at midnight
 FIELD_AMP_HOURS_YESTERDAY = 20  # Ah (not published in Android app)
 FIELD_AMP_HOURS_WEEK = 24       # Ah (not published in Android app)
 

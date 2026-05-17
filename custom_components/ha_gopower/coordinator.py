@@ -640,8 +640,10 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         solar_power_w = battery_voltage_v * solar_current_a
 
         # Ah → Wh
+        # Field[19] is fixed-point Ah×100 (e.g. raw 150 = 1.50 Ah), so divide
+        # by 100 first to get whole Ah before converting to Wh.
         amp_hours_today = _int_field(FIELD_AMP_HOURS_TODAY)
-        energy_wh = int(amp_hours_today * battery_voltage_v)
+        energy_wh = int((amp_hours_today / 100.0) * battery_voltage_v)
 
         # Serial: hex string → decimal
         serial_str = ""
