@@ -282,6 +282,27 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 exc_str = str(exc)
                 if any(k in exc_str for k in ("AlreadyExists", "Already Exists", "already")):
                     _LOGGER.info("Device %s already bonded in BlueZ", self._address)
+                elif any(k in exc_str for k in ("AuthenticationFailed", "Authentication Failed")):
+                    # BlueZ has a stale bond key that the device no longer recognises.
+                    # Remove the stale bond so the next reconnect does a fresh Just Works pair.
+                    _LOGGER.warning(
+                        "GoPower %s: stale bond (AuthenticationFailed) — "
+                        "removing BlueZ bond for fresh Just Works pair",
+                        self._address,
+                    )
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "bluetoothctl", "remove", self._address,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._reconnect_failures = 0  # fresh start after bond removal
+                    # The device immediately disconnects on auth failure; _on_disconnect
+                    # will schedule the reconnect.  Return now to avoid dead link use.
+                    return
                 else:
                     _LOGGER.warning(
                         "BLE pairing attempt for %s returned: %s "
