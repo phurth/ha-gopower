@@ -61,6 +61,7 @@ async def async_get_config_entry_diagnostics(
 
     return {
         "config_entry": async_redact_data(dict(entry.data), TO_REDACT_CONFIG),
+        "device_type": "SC" if coordinator._is_sc else "PWM",
         "connection": connection,
         "state": state_data,
         "raw_fields": raw_fields,

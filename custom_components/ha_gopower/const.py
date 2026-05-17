@@ -3,23 +3,40 @@
 DOMAIN = "ha_gopower"
 
 # ---------------------------------------------------------------------------
-# BLE Service & Characteristic UUIDs (standard BT SIG base)
+# BLE Service & Characteristic UUIDs — GP-PWM (FFF0 protocol)
 # ---------------------------------------------------------------------------
 SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
 WRITE_CHAR_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
 NOTIFY_CHAR_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 
 # ---------------------------------------------------------------------------
+# BLE Service & Characteristic UUIDs — GP-SC (569a protocol)
+# Advertises as GPPWM30BLE; uses a distinct vendor service.
+# Requires LE Legacy Just Works BLE pairing (must connect via local HCI).
+# ---------------------------------------------------------------------------
+SC_SERVICE_UUID = "569a1101-b87f-490c-92cb-11ba5ea5167c"
+SC_WRITE_CHAR_UUID = "569a2001-b87f-490c-92cb-11ba5ea5167c"
+SC_NOTIFY_CHAR_UUID = "569a2000-b87f-490c-92cb-11ba5ea5167c"
+
+# ---------------------------------------------------------------------------
+# Device type — stored in config entry data
+# ---------------------------------------------------------------------------
+CONF_DEVICE_TYPE = "device_type"
+DEVICE_TYPE_PWM = "PWM"   # GP-PWM family (FFF0 protocol, no pairing)
+DEVICE_TYPE_SC = "SC"     # GP-SC family (569a protocol, Just Works pairing)
+
+# ---------------------------------------------------------------------------
 # Device name prefixes for BLE discovery
 # ---------------------------------------------------------------------------
-DEVICE_NAME_PREFIXES = ("GP-PWM", "GoPower")
+DEVICE_NAME_PREFIXES = ("GP-PWM", "GoPower", "GPPWM")
 
 # ---------------------------------------------------------------------------
 # Protocol constants
 # ---------------------------------------------------------------------------
 POLL_COMMAND = b" "  # Single ASCII space (0x20)
 FIELD_DELIMITER = ";"
-EXPECTED_FIELD_COUNT = 32
+EXPECTED_FIELD_COUNT = 32       # GP-PWM: 32 semicolon-delimited fields
+SC_EXPECTED_FIELD_COUNT = 30    # GP-SC: 30 fields, response ends with \r\n
 
 # ---------------------------------------------------------------------------
 # Response field indices (semicolon-delimited ASCII)
@@ -35,6 +52,18 @@ FIELD_TEMP_F = 17             # signed int
 FIELD_AMP_HOURS_TODAY = 19   # Ah — multiply by battery voltage → Wh
 FIELD_AMP_HOURS_YESTERDAY = 20  # Ah (not published in Android app)
 FIELD_AMP_HOURS_WEEK = 24       # Ah (not published in Android app)
+
+# ---------------------------------------------------------------------------
+# GP-SC response field indices (30-field 569a protocol)
+# Confirmed from HCI capture (BT_HCI_2026_0517_130124.cfa) and
+# cross-referenced with SolarControllerDataStorage.updateD1Data().
+# ---------------------------------------------------------------------------
+SC_FIELD_BATTERY_CURRENT = 0   # raw ÷ 10 → A (charging current into battery)
+SC_FIELD_FIRMWARE = 6          # firmware version string
+SC_FIELD_BATTERY_VOLTAGE = 10  # mV → divide by 1000 → V
+SC_FIELD_SOC = 12              # state of charge (%)
+SC_FIELD_TEMP_C = 13           # signed temperature string e.g. "+23" or "-05"
+SC_FIELD_AMP_HOURS = 28        # cumulative battery amp-hours (units unconfirmed)
 
 # ---------------------------------------------------------------------------
 # Command byte strings (ASCII)

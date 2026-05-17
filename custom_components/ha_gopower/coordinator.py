@@ -30,6 +30,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    CONF_DEVICE_TYPE,
+    DEVICE_TYPE_SC,
     DOMAIN,
     EXPECTED_FIELD_COUNT,
     FIELD_AMP_HOURS_TODAY,
@@ -48,6 +50,15 @@ from .const import (
     POLL_INTERVAL,
     RECONNECT_BACKOFF_BASE,
     RECONNECT_BACKOFF_CAP,
+    SC_EXPECTED_FIELD_COUNT,
+    SC_FIELD_BATTERY_CURRENT,
+    SC_FIELD_BATTERY_VOLTAGE,
+    SC_FIELD_FIRMWARE,
+    SC_FIELD_SOC,
+    SC_FIELD_TEMP_C,
+    SC_NOTIFY_CHAR_UUID,
+    SC_SERVICE_UUID,
+    SC_WRITE_CHAR_UUID,
     SERVICE_DISCOVERY_DELAY,
     SERVICE_UUID,
     STALE_TIMEOUT,
@@ -78,7 +89,8 @@ class GoPowerState:
     energy_wh: int = 0             # Wh (Ah × battery voltage)
     firmware: str = ""
     serial: str = ""
-    raw_fields: list[str] | None = None  # All 32 fields for diagnostics
+    model_name: str = ""
+    raw_fields: list[str] | None = None  # All fields for diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +108,10 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         )
         self._address: str = entry.data[CONF_ADDRESS]
         self._entry = entry
+
+        # Device variant: True = GP-SC (569a GATT, Just Works pairing)
+        #                  False = GP-PWM (FFF0 GATT, no pairing)
+        self._is_sc: bool = entry.data.get(CONF_DEVICE_TYPE) == DEVICE_TYPE_SC
 
         # BLE client
         self._client: BleakClient | None = None
@@ -148,6 +164,27 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         """Return the BLE address."""
         return self._address
 
+    @property
+    def model_name(self) -> str:
+        """Return a human-readable model name for DeviceInfo."""
+        return "GP-PWM-30-UL" if self._is_sc else "GP-PWM-30-SB"
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _source_is_local_hci(source: str) -> bool:
+        """Return True if *source* looks like a local HCI adapter.
+
+        Local HCI adapter sources are reported as a Bluetooth MAC address
+        (e.g. ``AA:BB:CC:DD:EE:FF``).  ESPHome BT proxy sources are
+        hostnames or IP addresses, so this simple check correctly
+        distinguishes them without requiring D-Bus introspection.
+        """
+        import re  # noqa: PLC0415
+        return bool(re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', source))
+
     # ------------------------------------------------------------------
     # Connect / disconnect
     # ------------------------------------------------------------------
@@ -161,11 +198,55 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
 
     async def _do_connect(self) -> None:
         """Internal connect logic."""
-        _LOGGER.info("Connecting to GoPower %s", self._address)
-
-        device = bluetooth.async_ble_device_from_address(
-            self.hass, self._address, connectable=True
+        _LOGGER.info(
+            "Connecting to GoPower %s (variant=%s)",
+            self._address,
+            "SC" if self._is_sc else "PWM",
         )
+
+        device = None
+
+        if self._is_sc:
+            # GP-SC requires LE Legacy Just Works BLE pairing.  SMP pairing
+            # happens at the radio level and ESPHome BT proxies cannot relay
+            # the key exchange back to BlueZ on the HA host — so we must
+            # connect through a local HCI adapter.  Prefer the first local
+            # adapter candidate (MAC-address-format source) over any proxy.
+            try:
+                candidates = bluetooth.async_scanner_devices_by_address(
+                    self.hass, self._address, connectable=True
+                )
+            except Exception:  # noqa: BLE001
+                candidates = []
+
+            local_candidate = next(
+                (c for c in candidates if self._source_is_local_hci(c.scanner.source)),
+                None,
+            )
+            if local_candidate is not None:
+                device = local_candidate.ble_device
+                _LOGGER.info(
+                    "SC device %s: connecting via local HCI adapter %s "
+                    "(required for Just Works BLE pairing)",
+                    self._address,
+                    local_candidate.scanner.source,
+                )
+            else:
+                _LOGGER.warning(
+                    "SC device %s: no local HCI adapter visible in scanner pool "
+                    "(sources: %s) — pairing through a proxy will likely fail; "
+                    "ensure the HA host has a direct BLE adapter",
+                    self._address,
+                    [c.scanner.source for c in candidates],
+                )
+                device = bluetooth.async_ble_device_from_address(
+                    self.hass, self._address, connectable=True
+                )
+        else:
+            device = bluetooth.async_ble_device_from_address(
+                self.hass, self._address, connectable=True
+            )
+
         if device is None:
             _LOGGER.warning("GoPower device %s not found in BLE scan", self._address)
             self._schedule_reconnect()
@@ -189,32 +270,84 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         self._response_buffer = ""
         _LOGGER.info("Connected to GoPower %s", self._address)
 
+        # GP-SC: the 569a notify characteristic requires an encrypted link.
+        # Explicitly call pair() to trigger LE Legacy Just Works SMP bonding
+        # before accessing any secured characteristics.  BlueZ handles Just
+        # Works automatically (NoInputNoOutput) — no PIN agent needed.
+        if self._is_sc:
+            try:
+                await client.pair()
+                _LOGGER.info("BLE Just Works pairing completed for %s", self._address)
+            except Exception as exc:  # noqa: BLE001
+                exc_str = str(exc)
+                if any(k in exc_str for k in ("AlreadyExists", "Already Exists", "already")):
+                    _LOGGER.info("Device %s already bonded in BlueZ", self._address)
+                else:
+                    _LOGGER.warning(
+                        "BLE pairing attempt for %s returned: %s "
+                        "(will continue — device may accept if previously bonded)",
+                        self._address, exc,
+                    )
+
         # Discover services
         await asyncio.sleep(SERVICE_DISCOVERY_DELAY)
 
         services = client.services
-        svc = services.get_service(SERVICE_UUID)
+        service_uuid = SC_SERVICE_UUID if self._is_sc else SERVICE_UUID
+        write_uuid = SC_WRITE_CHAR_UUID if self._is_sc else WRITE_CHAR_UUID
+        notify_uuid = SC_NOTIFY_CHAR_UUID if self._is_sc else NOTIFY_CHAR_UUID
+
+        svc = services.get_service(service_uuid)
         if svc is None:
-            _LOGGER.error("GoPower service %s not found", SERVICE_UUID)
+            _LOGGER.error("GoPower service %s not found", service_uuid)
             await client.disconnect()
             return
 
-        write_char = svc.get_characteristic(WRITE_CHAR_UUID)
-        notify_char = svc.get_characteristic(NOTIFY_CHAR_UUID)
+        write_char = svc.get_characteristic(write_uuid)
+        notify_char = svc.get_characteristic(notify_uuid)
         if write_char is None or notify_char is None:
             _LOGGER.error("Required characteristics not found in GoPower service")
             await client.disconnect()
             return
 
-        # Enable notifications
+        # Enable notifications.
+        # BlueZ may have a stale AcquireNotify session from a prior connection
+        # attempt that wasn't cleanly released (common on rapid reconnects).
+        # Calling stop_notify first clears that state; ignore errors if it
+        # wasn't active.  Then retry start_notify once after a short delay
+        # if the first attempt hits NotPermitted.
         await asyncio.sleep(OPERATION_DELAY)
         try:
+            try:
+                await client.stop_notify(notify_char)
+            except Exception:  # noqa: BLE001
+                pass  # Not active — expected on first connect
+            await asyncio.sleep(OPERATION_DELAY)
             await client.start_notify(notify_char, self._on_notification)
-            _LOGGER.info("Notifications enabled on FFF1")
+            _LOGGER.info("Notifications enabled on %s", notify_uuid)
         except (BleakError, TimeoutError) as exc:
-            _LOGGER.error("Failed to enable notifications: %s", exc)
-            await client.disconnect()
-            return
+            if "NotPermitted" in str(exc) or "Notify acquired" in str(exc):
+                _LOGGER.warning(
+                    "start_notify NotPermitted (stale BlueZ state) — "
+                    "waiting 2s and retrying once"
+                )
+                await asyncio.sleep(2.0)
+                try:
+                    await client.stop_notify(notify_char)
+                except Exception:  # noqa: BLE001
+                    pass
+                await asyncio.sleep(0.5)
+                try:
+                    await client.start_notify(notify_char, self._on_notification)
+                    _LOGGER.info("Notifications enabled on %s (retry)", notify_uuid)
+                except (BleakError, TimeoutError) as retry_exc:
+                    _LOGGER.error("Failed to enable notifications (retry): %s", retry_exc)
+                    await client.disconnect()
+                    return
+            else:
+                _LOGGER.error("Failed to enable notifications: %s", exc)
+                await client.disconnect()
+                return
 
         # Start polling and watchdog
         self._start_polling()
@@ -315,7 +448,8 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         if not self._client or not self._connected:
             return
         try:
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, POLL_COMMAND)
+            write_uuid = SC_WRITE_CHAR_UUID if self._is_sc else WRITE_CHAR_UUID
+            await self._client.write_gatt_char(write_uuid, POLL_COMMAND)
         except (BleakError, TimeoutError, OSError) as exc:
             _LOGGER.warning("Poll write failed: %s", exc)
 
@@ -368,7 +502,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def _on_notification(
         self, characteristic: BleakGATTCharacteristic, data: bytearray
     ) -> None:
-        """Handle a BLE notification from FFF1."""
+        """Handle a BLE notification from the notify characteristic."""
         try:
             chunk = data.decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -376,34 +510,55 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             return
 
         self._response_buffer += chunk
-        semicolons = self._response_buffer.count(FIELD_DELIMITER)
 
-        if semicolons >= EXPECTED_FIELD_COUNT - 1:
-            # Complete response
-            raw = self._response_buffer
-            self._response_buffer = ""
-            self._last_data_time = time.monotonic()
-            self.hass.async_create_task(self._parse_and_update(raw))
+        if self._is_sc:
+            # SC response is ASCII terminated by \r\n.  Treat any newline as
+            # end-of-frame in case the \r is stripped by the BLE stack.
+            if "\r\n" in self._response_buffer or "\n" in self._response_buffer:
+                raw = self._response_buffer.rstrip("\r\n")
+                self._response_buffer = ""
+                self._last_data_time = time.monotonic()
+                self.hass.async_create_task(self._parse_and_update(raw))
+            else:
+                semicolons = self._response_buffer.count(FIELD_DELIMITER)
+                _LOGGER.debug(
+                    "Assembling SC response — %d/%d fields so far",
+                    semicolons + 1,
+                    SC_EXPECTED_FIELD_COUNT,
+                )
         else:
-            _LOGGER.debug(
-                "Assembling response — %d/%d fields so far",
-                semicolons + 1,
-                EXPECTED_FIELD_COUNT,
-            )
+            semicolons = self._response_buffer.count(FIELD_DELIMITER)
+            if semicolons >= EXPECTED_FIELD_COUNT - 1:
+                # Complete response
+                raw = self._response_buffer
+                self._response_buffer = ""
+                self._last_data_time = time.monotonic()
+                self.hass.async_create_task(self._parse_and_update(raw))
+            else:
+                _LOGGER.debug(
+                    "Assembling response — %d/%d fields so far",
+                    semicolons + 1,
+                    EXPECTED_FIELD_COUNT,
+                )
 
     async def _parse_and_update(self, raw: str) -> None:
         """Parse the complete ASCII response and update state."""
+        expected = SC_EXPECTED_FIELD_COUNT if self._is_sc else EXPECTED_FIELD_COUNT
         fields = raw.split(FIELD_DELIMITER)
-        if len(fields) < EXPECTED_FIELD_COUNT:
+        if len(fields) < expected:
             _LOGGER.warning(
                 "Incomplete response: %d fields (expected %d)",
                 len(fields),
-                EXPECTED_FIELD_COUNT,
+                expected,
             )
             return
 
         try:
-            state = self._parse_fields(fields)
+            state = (
+                self._parse_sc_fields(fields)
+                if self._is_sc
+                else self._parse_fields(fields)
+            )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to parse GoPower response")
             return
@@ -412,18 +567,30 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
 
         if not self._first_data_received:
             self._first_data_received = True
-            _LOGGER.info(
-                "First data from GoPower %s: battery=%.3fV, solar=%.3fV/%.3fA, "
-                "soc=%d%%, temp=%d°C, fw=%s, serial=%s",
-                self._address,
-                state.battery_voltage,
-                state.solar_voltage,
-                state.solar_current,
-                state.state_of_charge,
-                state.temperature_c,
-                state.firmware,
-                state.serial,
-            )
+            if self._is_sc:
+                _LOGGER.info(
+                    "First data from GoPower SC %s: battery=%.3fV, current=%.3fA, "
+                    "soc=%d%%, temp=%d°C, fw=%s",
+                    self._address,
+                    state.battery_voltage,
+                    state.solar_current,
+                    state.state_of_charge,
+                    state.temperature_c,
+                    state.firmware,
+                )
+            else:
+                _LOGGER.info(
+                    "First data from GoPower %s: battery=%.3fV, solar=%.3fV/%.3fA, "
+                    "soc=%d%%, temp=%d°C, fw=%s, serial=%s",
+                    self._address,
+                    state.battery_voltage,
+                    state.solar_voltage,
+                    state.solar_current,
+                    state.state_of_charge,
+                    state.temperature_c,
+                    state.firmware,
+                    state.serial,
+                )
 
         self.async_set_updated_data(state)
 
@@ -480,7 +647,65 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             energy_wh=energy_wh,
             firmware=fields[FIELD_FIRMWARE] if FIELD_FIRMWARE < len(fields) else "",
             serial=serial_str,
+            model_name="GP-PWM-30-SB",
             raw_fields=fields[:EXPECTED_FIELD_COUNT],
+        )
+
+    @staticmethod
+    def _parse_sc_fields(fields: list[str]) -> GoPowerState:
+        """Parse the GP-SC 30-field 569a-protocol response.
+
+        Field mapping confirmed from HCI capture BT_HCI_2026_0517_130124.cfa
+        and SolarControllerDataStorage.updateD1Data() decompile.
+        """
+
+        def _float_field(idx: int) -> float:
+            try:
+                return float(fields[idx])
+            except (ValueError, IndexError):
+                return 0.0
+
+        def _int_field(idx: int) -> int:
+            try:
+                return int(fields[idx])
+            except (ValueError, IndexError):
+                return 0
+
+        def _signed_temp(idx: int) -> int:
+            """Parse signed temperature like '+23' or '-05'."""
+            try:
+                return int(fields[idx].lstrip("+"))
+            except (ValueError, IndexError):
+                return 0
+
+        # Field [0]: raw unit is ~100 mA per count (0027 = 2700 mA = 2.7 A)
+        battery_current_a = _float_field(SC_FIELD_BATTERY_CURRENT) / 10.0
+
+        # Field [10]: battery voltage in mV
+        battery_voltage_v = _float_field(SC_FIELD_BATTERY_VOLTAGE) / 1000.0
+
+        # Approximate solar power = charging current × battery voltage
+        solar_power_w = battery_current_a * battery_voltage_v
+
+        firmware = (
+            fields[SC_FIELD_FIRMWARE]
+            if SC_FIELD_FIRMWARE < len(fields)
+            else ""
+        )
+
+        return GoPowerState(
+            solar_voltage=0.0,       # Not available in SC protocol
+            solar_current=round(battery_current_a, 3),
+            solar_power=round(solar_power_w, 1),
+            battery_voltage=round(battery_voltage_v, 3),
+            state_of_charge=_int_field(SC_FIELD_SOC),
+            temperature_c=_signed_temp(SC_FIELD_TEMP_C),
+            temperature_f=0,         # Not separately available in SC protocol
+            energy_wh=0,             # SC amp-hours field units unconfirmed
+            firmware=firmware,
+            serial="",               # Not available in SC protocol
+            model_name="GP-PWM-30-UL",
+            raw_fields=fields[:SC_EXPECTED_FIELD_COUNT],
         )
 
     # ------------------------------------------------------------------
@@ -488,12 +713,13 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     # ------------------------------------------------------------------
 
     async def async_send_command(self, command: bytes) -> None:
-        """Send a raw command to FFF2."""
+        """Send a raw command to the write characteristic."""
         if not self._client or not self._connected:
             _LOGGER.warning("Cannot send command — not connected")
             return
         try:
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, command)
+            write_uuid = SC_WRITE_CHAR_UUID if self._is_sc else WRITE_CHAR_UUID
+            await self._client.write_gatt_char(write_uuid, command)
         except (BleakError, TimeoutError, OSError) as exc:
             _LOGGER.error("Command write failed: %s", exc)
             raise

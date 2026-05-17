@@ -127,7 +127,7 @@ SENSOR_DESCRIPTIONS: tuple[GoPowerSensorDescription, ...] = (
         key="model_number",
         name="Model Number",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: "GP-PWM-30-SB",  # Only known model
+        value_fn=lambda s: s.model_name or "GP-PWM",
     ),
     GoPowerSensorDescription(
         key="firmware_version",
@@ -181,7 +181,7 @@ class GoPowerSensor(
             identifiers={(DOMAIN, address)},
             name=f"GoPower {address}",
             manufacturer="Go Power!",
-            model="GP-PWM Solar Controller",
+            model=coordinator.model_name,
             connections={("bluetooth", address)},
         )
 
