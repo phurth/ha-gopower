@@ -63,7 +63,7 @@ SC_FIELD_FIRMWARE = 6          # firmware version string
 SC_FIELD_BATTERY_VOLTAGE = 10  # mV → divide by 1000 → V
 SC_FIELD_SOC = 12              # state of charge (%)
 SC_FIELD_TEMP_C = 13           # signed temperature string e.g. "+23" or "-05"
-SC_FIELD_AMP_HOURS = 28        # cumulative battery amp-hours (units unconfirmed)
+SC_FIELD_AMP_HOURS = 28        # cumulative battery amp-hours (Ah × 100, same encoding as PWM FIELD_AMP_HOURS_TODAY)
 
 # ---------------------------------------------------------------------------
 # Command byte strings (ASCII)

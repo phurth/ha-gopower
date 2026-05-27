@@ -54,6 +54,7 @@ from .const import (
     SC_FIELD_BATTERY_CURRENT,
     SC_FIELD_BATTERY_VOLTAGE,
     SC_FIELD_FIRMWARE,
+    SC_FIELD_AMP_HOURS,
     SC_FIELD_SOC,
     SC_FIELD_TEMP_C,
     SC_NOTIFY_CHAR_UUID,
@@ -173,17 +174,52 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     # Helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _source_is_local_hci(source: str) -> bool:
-        """Return True if *source* looks like a local HCI adapter.
+    async def _async_get_local_hci_macs(self) -> set[str]:
+        """Return the MAC addresses of local BlueZ HCI adapters via D-Bus.
 
-        Local HCI adapter sources are reported as a Bluetooth MAC address
-        (e.g. ``AA:BB:CC:DD:EE:FF``).  ESPHome BT proxy sources are
-        hostnames or IP addresses, so this simple check correctly
-        distinguishes them without requiring D-Bus introspection.
+        Results are cached for 60 seconds to avoid repeated D-Bus calls.
+        Falls back to an empty set if D-Bus is unavailable (non-Linux host).
         """
-        import re  # noqa: PLC0415
-        return bool(re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', source))
+        now = time.monotonic()
+        cached_macs, cached_at = self.__dict__.get("_local_hci_cache", (set(), 0.0))
+        if now - cached_at < 60.0:
+            return cached_macs
+
+        macs: set[str] = set()
+        try:
+            from dbus_fast import BusType, Message, MessageType  # noqa: PLC0415
+            from dbus_fast.aio import MessageBus  # noqa: PLC0415
+
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            try:
+                reply = await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/",
+                        interface="org.freedesktop.DBus.ObjectManager",
+                        member="GetManagedObjects",
+                    )
+                )
+                if reply.message_type != MessageType.ERROR and reply.body:
+                    for interfaces in reply.body[0].values():
+                        adapter = interfaces.get("org.bluez.Adapter1")
+                        if adapter is not None:
+                            addr = adapter.get("Address")
+                            if addr is not None:
+                                if hasattr(addr, "value"):
+                                    addr = addr.value
+                                macs.add(str(addr).upper())
+            finally:
+                bus.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Could not enumerate local HCI adapters via D-Bus: %s", exc)
+
+        self._local_hci_cache = (macs, now)
+        return macs
+
+    def _source_is_local_hci(self, source: str, local_macs: set[str]) -> bool:
+        """Return True if *source* is a known local BlueZ HCI adapter MAC."""
+        return source.upper() in local_macs
 
     # ------------------------------------------------------------------
     # Connect / disconnect
@@ -211,7 +247,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             # happens at the radio level and ESPHome BT proxies cannot relay
             # the key exchange back to BlueZ on the HA host — so we must
             # connect through a local HCI adapter.  Prefer the first local
-            # adapter candidate (MAC-address-format source) over any proxy.
+            # adapter candidate (D-Bus confirmed BlueZ adapter) over any proxy.
             try:
                 candidates = bluetooth.async_scanner_devices_by_address(
                     self.hass, self._address, connectable=True
@@ -219,8 +255,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             except Exception:  # noqa: BLE001
                 candidates = []
 
+            local_macs = await self._async_get_local_hci_macs()
             local_candidate = next(
-                (c for c in candidates if self._source_is_local_hci(c.scanner.source)),
+                (c for c in candidates if self._source_is_local_hci(c.scanner.source, local_macs)),
                 None,
             )
             if local_candidate is not None:
@@ -299,7 +336,13 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
                     except Exception:  # noqa: BLE001
                         pass
-                    self._reconnect_failures = 0  # fresh start after bond removal
+                    # Wait 30 s before the next attempt so the device has time
+                    # to clear its own stale bond entry (many BLE devices purge
+                    # the bond after a prolonged disconnect).  The rapid 5-s
+                    # retry loop prevents the device from ever reaching that
+                    # timeout, keeping both sides stuck.
+                    self._reconnect_failures = 0
+                    await asyncio.sleep(30.0)
                     # The device immediately disconnects on auth failure; _on_disconnect
                     # will schedule the reconnect.  Return now to avoid dead link use.
                     return
@@ -730,6 +773,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             else ""
         )
 
+        # Field [28]: cumulative Ah × 100 (same encoding as PWM daily Ah field).
+        # Divide by 100 to get whole Ah, then multiply by battery voltage for Wh.
+        amp_hours_cumulative = _int_field(SC_FIELD_AMP_HOURS)
+        energy_wh = int((amp_hours_cumulative / 100.0) * battery_voltage_v)
+
         return GoPowerState(
             solar_voltage=None,      # Not reported by SC protocol
             solar_current=round(battery_current_a, 3),
@@ -738,7 +786,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             state_of_charge=_int_field(SC_FIELD_SOC),
             temperature_c=_signed_temp(SC_FIELD_TEMP_C),
             temperature_f=0,         # Not separately available in SC protocol
-            energy_wh=0,             # SC amp-hours field units unconfirmed
+            energy_wh=energy_wh,
             firmware=firmware,
             serial="",               # Not available in SC protocol
             model_name="GP-PWM-30-UL",
