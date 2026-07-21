@@ -76,7 +76,7 @@ body:
         ```yaml
         logger:
           logs:
-            custom_components.gopower: debug
+            custom_components.ha_gopower: debug
         ```
         Then paste the relevant log lines here.
       render: text
