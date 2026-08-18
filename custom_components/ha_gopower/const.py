@@ -26,6 +26,14 @@ DEVICE_TYPE_PWM = "PWM"   # GP-PWM family (FFF0 protocol, no pairing)
 DEVICE_TYPE_SC = "SC"     # GP-SC family (569a protocol, Just Works pairing)
 
 # ---------------------------------------------------------------------------
+# Adapter pinning — stored in config entry options (GP-SC only)
+# ---------------------------------------------------------------------------
+# BLE bonds are keyed to the adapter that created them, so a host with more
+# than one HCI adapter must reconnect through the same one.  Records the HA
+# scanner source (adapter MAC) that completed the Just Works pairing.
+CONF_BONDED_SOURCE = "bonded_source"
+
+# ---------------------------------------------------------------------------
 # Device name prefixes for BLE discovery
 # ---------------------------------------------------------------------------
 DEVICE_NAME_PREFIXES = ("GP-PWM", "GoPower", "GPPWM")

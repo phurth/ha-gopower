@@ -31,6 +31,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     BOND_RETRY_COOLDOWN,
+    CONF_BONDED_SOURCE,
     CONF_DEVICE_TYPE,
     DEVICE_TYPE_PWM,
     DEVICE_TYPE_SC,
@@ -137,6 +138,10 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Set after clearing a stale BlueZ bond so the controller gets an
         # uninterrupted idle window to drop its own bond entry.
         self._bond_cooldown_until: float = 0.0
+
+        # Scanner source (adapter MAC) used by the in-flight connection, so a
+        # successful GP-SC pairing can be pinned to the adapter that holds it.
+        self._current_connect_source: str | None = None
 
         # Locks
         self._connect_lock = asyncio.Lock()
@@ -245,6 +250,8 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             self._address,
             "SC" if self._is_sc else "PWM",
         )
+        # Cleared per attempt so a failed connect can never persist a stale source.
+        self._current_connect_source = None
 
         device = None
 
@@ -262,17 +269,43 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 candidates = []
 
             local_macs = await self._async_get_local_hci_macs()
-            local_candidate = next(
-                (c for c in candidates if self._source_is_local_hci(c.scanner.source, local_macs)),
-                None,
-            )
+            local_candidates = [
+                c for c in candidates
+                if self._source_is_local_hci(c.scanner.source, local_macs)
+            ]
+
+            # A BLE bond is keyed to the adapter that created it.  On a host
+            # with several HCI adapters, reconnecting through a different one
+            # presents an unfamiliar peer and the controller rejects pairing
+            # with AuthenticationFailed.  Prefer the adapter that completed the
+            # pairing last time; fall back to any local adapter if it is gone.
+            bonded_source: str | None = self._entry.options.get(CONF_BONDED_SOURCE)
+            local_candidate = None
+            if bonded_source:
+                local_candidate = next(
+                    (c for c in local_candidates if c.scanner.source == bonded_source),
+                    None,
+                )
+                if local_candidate is None and local_candidates:
+                    _LOGGER.warning(
+                        "SC device %s: bonded adapter %s unavailable (present: %s) — "
+                        "using another local adapter; a re-pair will likely be needed",
+                        self._address,
+                        bonded_source,
+                        [c.scanner.source for c in local_candidates],
+                    )
+            if local_candidate is None:
+                local_candidate = local_candidates[0] if local_candidates else None
+
             if local_candidate is not None:
                 device = local_candidate.ble_device
+                self._current_connect_source = local_candidate.scanner.source
                 _LOGGER.info(
-                    "SC device %s: connecting via local HCI adapter %s "
+                    "SC device %s: connecting via local HCI adapter %s%s "
                     "(required for Just Works BLE pairing)",
                     self._address,
                     local_candidate.scanner.source,
+                    " [pinned]" if local_candidate.scanner.source == bonded_source else "",
                 )
             else:
                 _LOGGER.warning(
@@ -450,6 +483,25 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # then fails to pair; resetting earlier let that path restart the
         # backoff from the base delay on every failed attempt.
         self._reconnect_failures = 0
+
+        # Pin the adapter that carries the bond.  Persist only now, on a fully
+        # working connection, so a failed pairing attempt can never lock future
+        # connects to the wrong adapter.  GP-PWM does not pair, so has no bond
+        # to pin.
+        if self._is_sc and self._current_connect_source is not None:
+            if self._entry.options.get(CONF_BONDED_SOURCE) != self._current_connect_source:
+                _LOGGER.info(
+                    "Pinning GoPower %s to bonded adapter %s",
+                    self._address,
+                    self._current_connect_source,
+                )
+                self.hass.config_entries.async_update_entry(
+                    self._entry,
+                    options={
+                        **self._entry.options,
+                        CONF_BONDED_SOURCE: self._current_connect_source,
+                    },
+                )
 
         # Start polling and watchdog
         self._start_polling()

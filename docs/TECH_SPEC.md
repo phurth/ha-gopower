@@ -26,6 +26,11 @@
   correct protocol path
 - manual MAC address path is available when discovery is incomplete
 - setup forwards platforms and starts initial connection in background
+- GP-SC entries pin the adapter that completed pairing (`bonded_source` in entry
+  options) and prefer it on reconnect; BLE bonds are per-adapter, so a
+  multi-adapter host must return to the same radio or pairing is rejected
+- the pin is persisted only after a fully working connection, so a failed
+  pairing attempt cannot lock the entry to the wrong adapter
 
 ## 4. Runtime Lifecycle
 
