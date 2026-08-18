@@ -15,9 +15,15 @@
 ## 3. Configuration and Entry Setup
 
 - config flow supports BLE auto-discovery (service UUID and name-prefix matching)
-- device type (PWM or SC) is inferred at config time from the advertised BLE local name:
-  - `GPPWM*` → SC (GP-PWM-30-UL, 569a protocol)
-  - `GP-PWM*` / `GoPower*` → PWM (GP-PWM-30-SB, FFF0 protocol)
+- device type (PWM or SC) is inferred at config time, service UUID first:
+  - advertises `569a1101-…` → SC (569a protocol)
+  - advertises `0000fff0-…` → PWM (FFF0 protocol)
+  - neither advertised → name fallback: `GPPWM*` → SC, otherwise PWM
+- the local name is only a fallback: model badging does not reliably track the
+  protocol (units badged GP-PWM-30-SB have been reported advertising 569a)
+- if the stored type turns out wrong, the coordinator detects the mismatch at
+  service discovery, rewrites the entry's device type, and reconnects on the
+  correct protocol path
 - manual MAC address path is available when discovery is incomplete
 - setup forwards platforms and starts initial connection in background
 

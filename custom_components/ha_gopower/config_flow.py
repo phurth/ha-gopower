@@ -10,6 +10,7 @@ Also supports manual entry by MAC address.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import voluptuous as vol
@@ -26,8 +27,19 @@ from .const import DEVICE_NAME_PREFIXES, DOMAIN, SERVICE_UUID, SC_SERVICE_UUID, 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _infer_device_type(name: str) -> str:
-    """Infer device type from BLE advertisement name."""
+def _infer_device_type(name: str, service_uuids: Iterable[str] | None = None) -> str:
+    """Infer device type, preferring advertised service UUIDs over the name.
+
+    The advertised local name does not reliably encode the protocol: units
+    badged GP-PWM-30-SB have been seen advertising the 569a (GP-SC) service.
+    When the advertisement carries a known service UUID it is authoritative;
+    the name prefix is only a fallback for devices that advertise neither.
+    """
+    uuids = {u.lower() for u in (service_uuids or ())}
+    if SC_SERVICE_UUID.lower() in uuids:
+        return DEVICE_TYPE_SC
+    if SERVICE_UUID.lower() in uuids:
+        return DEVICE_TYPE_PWM
     if name.startswith("GPPWM"):
         return DEVICE_TYPE_SC
     return DEVICE_TYPE_PWM
@@ -62,7 +74,9 @@ class GoPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         self._discovery_info = discovery_info
-        self._device_type = _infer_device_type(discovery_info.name or "")
+        self._device_type = _infer_device_type(
+            discovery_info.name or "", discovery_info.service_uuids
+        )
         name = discovery_info.name or discovery_info.address
         self.context["title_placeholders"] = {"name": name}
 
@@ -108,7 +122,11 @@ class GoPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             # Infer device type from discovered device name if available,
             # otherwise default to PWM for pure-manual MAC entry.
             info = self._discovered_devices.get(address)
-            device_type = _infer_device_type(info.name or "") if info else DEVICE_TYPE_PWM
+            device_type = (
+                _infer_device_type(info.name or "", info.service_uuids)
+                if info
+                else DEVICE_TYPE_PWM
+            )
             return self.async_create_entry(
                 title=f"GoPower {address}",
                 data={CONF_ADDRESS: address, CONF_DEVICE_TYPE: device_type},

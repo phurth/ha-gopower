@@ -30,7 +30,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    BOND_RETRY_COOLDOWN,
     CONF_DEVICE_TYPE,
+    DEVICE_TYPE_PWM,
     DEVICE_TYPE_SC,
     DOMAIN,
     EXPECTED_FIELD_COUNT,
@@ -131,6 +133,10 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         self._watchdog_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._reconnect_failures: int = 0
+        # Deadline (time.monotonic) before which no reconnect may be attempted.
+        # Set after clearing a stale BlueZ bond so the controller gets an
+        # uninterrupted idle window to drop its own bond entry.
+        self._bond_cooldown_until: float = 0.0
 
         # Locks
         self._connect_lock = asyncio.Lock()
@@ -336,15 +342,16 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
                     except Exception:  # noqa: BLE001
                         pass
-                    # Wait 30 s before the next attempt so the device has time
-                    # to clear its own stale bond entry (many BLE devices purge
-                    # the bond after a prolonged disconnect).  The rapid 5-s
-                    # retry loop prevents the device from ever reaching that
-                    # timeout, keeping both sides stuck.
-                    self._reconnect_failures = 0
-                    await asyncio.sleep(30.0)
-                    # The device immediately disconnects on auth failure; _on_disconnect
-                    # will schedule the reconnect.  Return now to avoid dead link use.
+                    # The controller only purges its own stale bond entry after a
+                    # prolonged idle period, so hold off that long before retrying.
+                    # Record a deadline instead of sleeping here: the device drops
+                    # the link immediately on auth failure, so _on_disconnect has
+                    # already queued a reconnect by this point and a sleep in this
+                    # task would not gate it.  _schedule_reconnect enforces it.
+                    self._bond_cooldown_until = time.monotonic() + BOND_RETRY_COOLDOWN
+                    # Deliberately leave _reconnect_failures alone: resetting it
+                    # pinned the backoff at the base delay, so repeated bond
+                    # failures hammered the adapter instead of backing off.
                     return
                 else:
                     _LOGGER.warning(
@@ -363,6 +370,32 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
 
         svc = services.get_service(service_uuid)
         if svc is None:
+            # The advertised name does not reliably encode the protocol — some
+            # units badged GP-PWM-30-SB expose the 569a service.  If the other
+            # variant's service is present, correct the stored device type so
+            # the entry self-heals instead of failing on every reconnect.
+            other_uuid = SERVICE_UUID if self._is_sc else SC_SERVICE_UUID
+            if services.get_service(other_uuid) is not None:
+                corrected = DEVICE_TYPE_PWM if self._is_sc else DEVICE_TYPE_SC
+                _LOGGER.warning(
+                    "GoPower %s: service %s absent but %s present — device is "
+                    "actually variant %s, correcting stored device type and "
+                    "reconnecting via the matching protocol",
+                    self._address,
+                    service_uuid,
+                    other_uuid,
+                    corrected,
+                )
+                self._is_sc = corrected == DEVICE_TYPE_SC
+                self.hass.config_entries.async_update_entry(
+                    self._entry,
+                    data={**self._entry.data, CONF_DEVICE_TYPE: corrected},
+                )
+                # Reconnect from scratch rather than continuing on this link:
+                # the GP-SC path must pair before touching the 569a notify
+                # characteristic, and that step was skipped on this attempt.
+                await client.disconnect()
+                return
             _LOGGER.error("GoPower service %s not found", service_uuid)
             await client.disconnect()
             return
@@ -455,6 +488,16 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             RECONNECT_BACKOFF_BASE * (2 ** (self._reconnect_failures - 1)),
             RECONNECT_BACKOFF_CAP,
         )
+        # Never retry before a pending stale-bond cooldown expires — the
+        # controller needs that idle window to drop its own bond entry.
+        cooldown_remaining = self._bond_cooldown_until - time.monotonic()
+        if cooldown_remaining > delay:
+            _LOGGER.info(
+                "Holding reconnect for %.0fs (stale-bond cooldown) instead of %.0fs",
+                cooldown_remaining,
+                delay,
+            )
+            delay = cooldown_remaining
         _LOGGER.info(
             "Reconnecting in %.0fs (attempt %d)", delay, self._reconnect_failures
         )

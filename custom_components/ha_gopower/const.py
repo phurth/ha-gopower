@@ -82,5 +82,6 @@ OPERATION_DELAY = 0.1         # Delay between BLE operations
 SERVICE_DISCOVERY_DELAY = 0.2
 RECONNECT_BACKOFF_BASE = 5.0
 RECONNECT_BACKOFF_CAP = 120.0
+BOND_RETRY_COOLDOWN = 30.0    # Idle window after clearing a stale bond (GP-SC only)
 STALE_TIMEOUT = 300.0         # 5 min without data → stale
 WATCHDOG_INTERVAL = 60.0      # Connection health-check every 60s
