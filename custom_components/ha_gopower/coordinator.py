@@ -309,7 +309,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
 
         self._client = client
         self._connected = True
-        self._reconnect_failures = 0
         self._response_buffer = ""
         _LOGGER.info("Connected to GoPower %s", self._address)
 
@@ -446,6 +445,12 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 await client.disconnect()
                 return
 
+        # Only now is the connection actually usable, so clear the backoff here
+        # rather than at link establishment.  A GP-SC link establishes fine and
+        # then fails to pair; resetting earlier let that path restart the
+        # backoff from the base delay on every failed attempt.
+        self._reconnect_failures = 0
+
         # Start polling and watchdog
         self._start_polling()
         self._start_watchdog()
@@ -506,8 +511,18 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         )
 
     async def _reconnect_after(self, delay: float) -> None:
-        """Wait then reconnect."""
+        """Wait then reconnect, honouring any stale-bond cooldown."""
         await asyncio.sleep(delay)
+        # The cooldown may have been set *after* this retry was queued: the
+        # device drops the link the instant pairing fails, so _on_disconnect
+        # can reach _schedule_reconnect before the pairing error handler runs.
+        # Re-check the deadline here so the hold applies regardless of ordering.
+        remaining = self._bond_cooldown_until - time.monotonic()
+        if remaining > 0:
+            _LOGGER.info(
+                "Deferring reconnect a further %.0fs (stale-bond cooldown)", remaining
+            )
+            await asyncio.sleep(remaining)
         try:
             await self.async_connect()
         except Exception:  # noqa: BLE001
