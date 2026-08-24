@@ -79,10 +79,13 @@ host itself. If entities stay unavailable and the log repeats
   Bluetooth → Configure). On Linux the default "auto" mode resolves to passive
   scanning, which makes BlueZ slower to re-register a device after a bond is
   cleared.
-- **Give the controller an idle window.** It only drops its own stale bond entry
-  after a prolonged quiet period — up to ~15 minutes. Close the Go Power Connect
-  app while waiting; a phone holding the link keeps the controller busy.
-- **Power-cycle the controller** if the bond never clears.
+- **Expect one or two rejections after a Home Assistant restart.** The controller
+  rejects a reconnect whenever its bond no longer matches. The integration clears
+  the BlueZ bond and immediately re-pairs, which normally recovers within a couple
+  of seconds — look for `retrying at once while the clear is fresh` followed by
+  `BLE Just Works pairing completed`.
+- **If rejections continue,** close the Go Power Connect app (a phone holding the
+  link keeps the controller busy) and power-cycle the controller.
 
 ## License
 

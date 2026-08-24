@@ -33,6 +33,7 @@ from .const import (
     ADVERTISEMENT_WAIT,
     BOND_RETRY_COOLDOWN,
     BOND_RETRY_COOLDOWN_CAP,
+    IMMEDIATE_RETRY_DELAY,
     CONF_BONDED_SOURCE,
     CONF_DEVICE_TYPE,
     DEVICE_TYPE_PWM,
@@ -141,8 +142,19 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Set after clearing a stale BlueZ bond so the controller gets an
         # uninterrupted idle window to drop its own bond entry.
         self._bond_cooldown_until: float = 0.0
+        # Energy high-water mark; see _monotonic_energy_wh.
+        self._energy_high_water: int = 0
+        self._last_amp_hours_raw: int = 0
+
         # Consecutive stale-bond clears, used to escalate the cooldown.
         self._bond_failures: int = 0
+        # One retry straight after a confirmed bond clear, per normal attempt:
+        # _immediate_retry_pending is set when such a retry is queued, and
+        # _next/_attempt_is_immediate track whether the attempt now running is
+        # that retry, so an immediate retry never spawns another one.
+        self._immediate_retry_pending = False
+        self._next_attempt_immediate = False
+        self._attempt_is_immediate = False
 
         # Local BlueZ adapter MACs, with the time they were enumerated.  Only a
         # non-empty result is ever cached — see _async_get_local_hci_macs.
@@ -473,11 +485,17 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 self._address, sources,
             )
         else:
-            _LOGGER.warning(
-                "SC device %s: seen only by %s, none of which is a local adapter "
-                "(local adapters here: %s). Just Works pairing cannot be relayed "
-                "through an ESPHome proxy — bring the controller within range of "
-                "the Home Assistant host's own BLE adapter",
+            # Clearing a bond briefly removes the address from the local
+            # adapter's live cache (BlueZ InterfacesRemoved), so on a post-clear
+            # retry this is expected and the fallback still normally lands on a
+            # local adapter — it is not evidence of a range problem.
+            log = _LOGGER.debug if self._attempt_is_immediate else _LOGGER.warning
+            log(
+                "SC device %s: currently seen only by %s, none of which is a local "
+                "adapter (local adapters here: %s) — falling back to the source "
+                "Home Assistant picks. Just Works pairing cannot be relayed through "
+                "an ESPHome proxy, so if this repeats the controller may be out of "
+                "range of the host's own adapter",
                 self._address, sources, sorted(local_macs),
             )
 
@@ -500,6 +518,20 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         async with self._connect_lock:
             if self._connected:
                 return
+            # Re-check the stale-bond hold under the lock.  Several reconnect
+            # tasks can be in flight at once, and one that cleared its own
+            # pre-connect check microseconds before the cooldown was recorded
+            # would otherwise connect straight through the idle window the
+            # controller needs to drop its bond — restarting the thrash.
+            remaining = self._bond_cooldown_until - time.monotonic()
+            if remaining > 0:
+                _LOGGER.info(
+                    "Skipping connect to %s: %.0fs of stale-bond cooldown remain",
+                    self._address, remaining,
+                )
+                if self._reconnect_task is None:
+                    self._schedule_reconnect()
+                return
             await self._do_connect()
 
     async def _do_connect(self) -> None:
@@ -511,6 +543,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         )
         # Cleared per attempt so a failed connect can never persist a stale source.
         self._current_connect_source = None
+        self._attempt_is_immediate = self._next_attempt_immediate
+        self._next_attempt_immediate = False
+        self._immediate_retry_pending = False
 
         device = None
 
@@ -565,26 +600,51 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         "removing BlueZ bond for fresh Just Works pair",
                         self._address,
                     )
-                    await self._async_remove_bluez_bond()
-                    # The controller only purges its own stale bond entry after a
-                    # prolonged idle period — field logs show it taking upwards of
-                    # ten minutes — so the wait escalates with each consecutive
-                    # failure instead of hammering a fixed short retry.
-                    # Record a deadline instead of sleeping here: the device drops
-                    # the link immediately on auth failure, so _on_disconnect has
-                    # already queued a reconnect by this point and a sleep in this
-                    # task would not gate it.  _schedule_reconnect enforces it.
+                    # Record the cooldown *before* any await.  The controller
+                    # only purges its own stale bond entry after a prolonged
+                    # idle period — field logs show upwards of ten minutes — so
+                    # the wait escalates with each consecutive failure instead
+                    # of hammering a fixed short retry.  Setting the deadline
+                    # first means a cancellation landing inside the removal
+                    # cannot discard it.  A deadline rather than a sleep here:
+                    # the device drops the link immediately on auth failure, so
+                    # _on_disconnect may already have queued a reconnect, and
+                    # both _schedule_reconnect and _reconnect_after enforce it.
                     self._bond_failures += 1
                     cooldown = min(
                         BOND_RETRY_COOLDOWN * (2 ** (self._bond_failures - 1)),
                         BOND_RETRY_COOLDOWN_CAP,
                     )
+                    self._bond_cooldown_until = time.monotonic() + cooldown
+                    removed = await self._async_remove_bluez_bond()
+
+                    # The only pair this controller has ever accepted came
+                    # immediately after a completed RemoveDevice, with no gap;
+                    # every attempt made seconds or minutes after a clear has
+                    # been rejected.  So when a clear is confirmed, spend one
+                    # retry on that pattern before falling back to the idle
+                    # window.  An immediate retry never queues another, so it
+                    # costs at most one extra attempt per cooldown cycle.
+                    if removed and not self._attempt_is_immediate:
+                        self._bond_cooldown_until = 0.0
+                        self._immediate_retry_pending = True
+                        _LOGGER.info(
+                            "Bond for %s cleared — retrying at once while the "
+                            "clear is fresh (consecutive failures: %d)",
+                            self._address, self._bond_failures,
+                        )
+                        # Schedule it here rather than relying on the disconnect
+                        # callback: that callback can run either side of this
+                        # handler, and when it runs first it queues the ordinary
+                        # cooldown retry and nothing would consume the flag.
+                        self._schedule_reconnect()
+                        return
+
                     _LOGGER.info(
                         "Holding %s idle for %.0fs so the controller can drop its "
                         "own stale bond (consecutive failures: %d)",
                         self._address, cooldown, self._bond_failures,
                     )
-                    self._bond_cooldown_until = time.monotonic() + cooldown
                     # Deliberately leave _reconnect_failures alone: resetting it
                     # pinned the backoff at the base delay, so repeated bond
                     # failures hammered the adapter instead of backing off.
@@ -745,6 +805,23 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         """Schedule a reconnection attempt with exponential backoff."""
         self._cancel_reconnect()
         self._reconnect_failures += 1
+        if self._immediate_retry_pending:
+            # Post-clear retry: deliberately skips both the backoff and the
+            # stale-bond hold, which is the entire point of the attempt.  The
+            # flag is cleared when the attempt starts, not here, so a later
+            # disconnect callback re-scheduling cannot downgrade it back to an
+            # ordinary cooldown retry.
+            self._next_attempt_immediate = True
+            _LOGGER.info(
+                "Reconnecting to %s in %.1fs (post-clear retry)",
+                self._address, IMMEDIATE_RETRY_DELAY,
+            )
+            self._reconnect_task = self._entry.async_create_background_task(
+                self.hass,
+                self._reconnect_after(IMMEDIATE_RETRY_DELAY),
+                "gopower_reconnect",
+            )
+            return
         delay = min(
             RECONNECT_BACKOFF_BASE * (2 ** (self._reconnect_failures - 1)),
             RECONNECT_BACKOFF_CAP,
@@ -779,16 +856,38 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 "Deferring reconnect a further %.0fs (stale-bond cooldown)", remaining
             )
             await asyncio.sleep(remaining)
+        # Past this point the task is no longer a *pending* reconnect — it is the
+        # connect itself.  Detach it so that a disconnect arriving mid-connect
+        # cancels nothing: a failed pair drops the link instantly, and cancelling
+        # here killed the handler that records the stale-bond cooldown and could
+        # cut the BlueZ bond removal in half.  Home Assistant still owns the task
+        # (async_create_background_task) and cancels it on unload.
+        if self._reconnect_task is asyncio.current_task():
+            self._reconnect_task = None
         try:
             await self.async_connect()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Reconnect failed")
 
     def _cancel_reconnect(self) -> None:
-        """Cancel pending reconnect."""
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            self._reconnect_task = None
+        """Cancel a *pending* reconnect.
+
+        A reconnect task detaches itself from _reconnect_task once it stops
+        waiting and starts connecting (see _reconnect_after), so an in-flight
+        connect is never cancelled from here.  It used to be: a failed pair
+        makes the controller drop the link instantly, and the resulting
+        _on_disconnect -> _schedule_reconnect -> _cancel_reconnect chain killed
+        the very task running _do_connect, discarding the stale-bond
+        bookkeeping that follows and sometimes cutting the bond removal in
+        half.  That is why the cooldown never applied and retries ran at the
+        plain backoff cap.
+        """
+        task = self._reconnect_task
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        self._reconnect_task = None
 
     # ------------------------------------------------------------------
     # Polling loop
@@ -941,6 +1040,17 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             _LOGGER.exception("Failed to parse GoPower response")
             return
 
+        # Smooth the voltage-driven wobble out of the energy total before it
+        # reaches the recorder (both variants derive Wh from an Ah counter).
+        ah_index = SC_FIELD_AMP_HOURS if self._is_sc else FIELD_AMP_HOURS_TODAY
+        try:
+            raw_ah_int = int(state.raw_fields[ah_index])
+        except (IndexError, TypeError, ValueError):
+            # Unparseable counter: treat as unchanged so the mark is only held,
+            # never released on bad data.
+            raw_ah_int = self._last_amp_hours_raw
+        state.energy_wh = self._monotonic_energy_wh(raw_ah_int, state.energy_wh)
+
         self.state = state
 
         if not self._first_data_received:
@@ -976,6 +1086,27 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 )
 
         self.async_set_updated_data(state)
+
+    def _monotonic_energy_wh(self, amp_hours_raw: int, energy_wh: int) -> int:
+        """Return an energy total that only falls when the counter itself resets.
+
+        energy_wh is an Ah counter scaled by the *live* battery voltage, so it
+        drifts down whenever the battery sags even though no energy was
+        un-delivered.  A sensor with state_class total_increasing treats any
+        decrease as a counter wrap and adds the whole new value to the
+        long-term sum, so a 0.1 % voltage dip used to inject a spurious
+        multi-kWh jump into statistics.
+
+        Hold a high-water mark and release it only when the underlying Ah
+        counter drops — a real reset (daily rollover, or the Reset History
+        button), which total_increasing is designed to handle.
+        """
+        if amp_hours_raw < self._last_amp_hours_raw:
+            self._energy_high_water = energy_wh
+        else:
+            self._energy_high_water = max(self._energy_high_water, energy_wh)
+        self._last_amp_hours_raw = amp_hours_raw
+        return self._energy_high_water
 
     @staticmethod
     def _parse_fields(fields: list[str]) -> GoPowerState:

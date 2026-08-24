@@ -38,9 +38,19 @@
   a device rebuilt from history has no reachable backend. When no live source
   holds the address the coordinator waits for a fresh advertisement, requesting
   active scanning, before falling back
-- stale bonds are cleared through `org.bluez.Adapter1.RemoveDevice` over D-Bus,
-  and the post-clear idle window escalates (60 s doubling to 900 s) because the
-  controller drops its own bond entry only after a prolonged quiet period
+- stale bonds are cleared through `org.bluez.Adapter1.RemoveDevice` over D-Bus;
+  a confirmed clear is followed by one immediate reconnect (queued on the next
+  event-loop iteration), which is the only sequence GP-SC controllers have been
+  observed to accept a fresh pair from
+- if that retry is also rejected, an escalating idle window applies (60 s doubling
+  to a 900 s cap, reset on a successful pair); an immediate retry never queues
+  another, bounding the cost at one extra attempt per cycle
+- reconnect tasks detach themselves from the pending-reconnect slot once they stop
+  waiting and begin connecting, so a disconnect arriving mid-connect cannot cancel
+  the handler that records bond state
+- energy totals are held at a high-water mark that is released only when the raw
+  Ah counter drops, so voltage-driven wobble in the derived Wh value is not
+  mistaken for a counter reset by `total_increasing` statistics
 
 ## 4. Runtime Lifecycle
 

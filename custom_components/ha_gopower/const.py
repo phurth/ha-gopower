@@ -96,6 +96,11 @@ RECONNECT_BACKOFF_CAP = 120.0
 # than hammering a fixed short retry.
 BOND_RETRY_COOLDOWN = 60.0
 BOND_RETRY_COOLDOWN_CAP = 900.0
+# Gap before the single retry that follows a confirmed bond clear.  Both pairs
+# this controller has ever accepted came within ~1 ms of a RemoveDevice, and a
+# deliberate 0.5 s retry was already too late, so this queues the reconnect on
+# the very next event-loop iteration rather than waiting at all.
+IMMEDIATE_RETRY_DELAY = 0.0
 LOCAL_HCI_CACHE_TTL = 60.0    # Cache lifetime for a *successful* adapter enumeration
 ADVERTISEMENT_WAIT = 30.0     # Wait for the address to re-enter a scanner's live cache
 STALE_TIMEOUT = 300.0         # 5 min without data → stale
