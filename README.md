@@ -65,6 +65,25 @@ For a PWM controller the solar panel connects directly to the battery during the
 - **Notify** (`569a2000`): 30-field semicolon-delimited ASCII response, terminated `\r\n`
 - **Pairing**: LE Legacy Just Works (BlueZ handles automatically via local HCI)
 
+## Troubleshooting GP-PWM-30-UL pairing
+
+The 569a variant bonds at the radio level, which an ESPHome Bluetooth proxy cannot
+relay — it must connect through a Bluetooth adapter attached to the Home Assistant
+host itself. If entities stay unavailable and the log repeats
+`stale bond (AuthenticationFailed)`:
+
+- **Check which source is being used.** `connecting via local HCI adapter …` means
+  a direct adapter was found. A warning naming only proxy sources means the
+  controller is out of range of the host's own adapter.
+- **Set the adapter's scanning mode to Active** (Settings → Devices & Services →
+  Bluetooth → Configure). On Linux the default "auto" mode resolves to passive
+  scanning, which makes BlueZ slower to re-register a device after a bond is
+  cleared.
+- **Give the controller an idle window.** It only drops its own stale bond entry
+  after a prolonged quiet period — up to ~15 minutes. Close the Go Power Connect
+  app while waiting; a phone holding the link keeps the controller busy.
+- **Power-cycle the controller** if the bond never clears.
+
 ## License
 
 MIT

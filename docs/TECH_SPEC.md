@@ -31,6 +31,16 @@
   multi-adapter host must return to the same radio or pairing is rejected
 - the pin is persisted only after a fully working connection, so a failed
   pairing attempt cannot lock the entry to the wrong adapter
+- local adapter identity is resolved over the BlueZ D-Bus object manager; only a
+  non-empty enumeration is cached, since an empty one disables pinning and routes
+  SC connects to whatever source the manager offers (possibly a proxy)
+- SC device selection reads the scanners' live caches, not advertisement history:
+  a device rebuilt from history has no reachable backend. When no live source
+  holds the address the coordinator waits for a fresh advertisement, requesting
+  active scanning, before falling back
+- stale bonds are cleared through `org.bluez.Adapter1.RemoveDevice` over D-Bus,
+  and the post-clear idle window escalates (60 s doubling to 900 s) because the
+  controller drops its own bond entry only after a prolonged quiet period
 
 ## 4. Runtime Lifecycle
 

@@ -30,7 +30,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    ADVERTISEMENT_WAIT,
     BOND_RETRY_COOLDOWN,
+    BOND_RETRY_COOLDOWN_CAP,
     CONF_BONDED_SOURCE,
     CONF_DEVICE_TYPE,
     DEVICE_TYPE_PWM,
@@ -47,6 +49,7 @@ from .const import (
     FIELD_SOLAR_VOLTAGE,
     FIELD_TEMP_C,
     FIELD_TEMP_F,
+    LOCAL_HCI_CACHE_TTL,
     NOTIFY_CHAR_UUID,
     OPERATION_DELAY,
     POLL_COMMAND,
@@ -138,6 +141,13 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Set after clearing a stale BlueZ bond so the controller gets an
         # uninterrupted idle window to drop its own bond entry.
         self._bond_cooldown_until: float = 0.0
+        # Consecutive stale-bond clears, used to escalate the cooldown.
+        self._bond_failures: int = 0
+
+        # Local BlueZ adapter MACs, with the time they were enumerated.  Only a
+        # non-empty result is ever cached — see _async_get_local_hci_macs.
+        self._local_hci_cache: tuple[set[str], float] = (set(), 0.0)
+        self._local_hci_warned = False
 
         # Scanner source (adapter MAC) used by the in-flight connection, so a
         # successful GP-SC pairing can be pinned to the adapter that holds it.
@@ -188,15 +198,22 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     async def _async_get_local_hci_macs(self) -> set[str]:
         """Return the MAC addresses of local BlueZ HCI adapters via D-Bus.
 
-        Results are cached for 60 seconds to avoid repeated D-Bus calls.
-        Falls back to an empty set if D-Bus is unavailable (non-Linux host).
+        Only a *successful* (non-empty) lookup is cached.  An empty result
+        disables adapter pinning altogether, so caching one turned a momentary
+        D-Bus hiccup into a 60-second window where every GP-SC connect silently
+        fell through to whatever source the manager offered — including an
+        ESPHome proxy, which can never complete SMP pairing and so guaranteed
+        an AuthenticationFailed / bond-wipe loop.
+
+        Returns an empty set if D-Bus is unavailable (non-Linux host).
         """
         now = time.monotonic()
-        cached_macs, cached_at = self.__dict__.get("_local_hci_cache", (set(), 0.0))
-        if now - cached_at < 60.0:
+        cached_macs, cached_at = self._local_hci_cache
+        if cached_macs and now - cached_at < LOCAL_HCI_CACHE_TTL:
             return cached_macs
 
         macs: set[str] = set()
+        failure: str | None = None
         try:
             from dbus_fast import BusType, Message, MessageType  # noqa: PLC0415
             from dbus_fast.aio import MessageBus  # noqa: PLC0415
@@ -211,7 +228,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         member="GetManagedObjects",
                     )
                 )
-                if reply.message_type != MessageType.ERROR and reply.body:
+                if reply.message_type == MessageType.ERROR or not reply.body:
+                    failure = getattr(reply, "error_name", None) or "empty reply"
+                else:
                     for interfaces in reply.body[0].values():
                         adapter = interfaces.get("org.bluez.Adapter1")
                         if adapter is not None:
@@ -223,14 +242,254 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             finally:
                 bus.disconnect()
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("Could not enumerate local HCI adapters via D-Bus: %s", exc)
+            failure = f"{type(exc).__name__}: {exc}"
 
-        self._local_hci_cache = (macs, now)
+        if macs:
+            self._local_hci_cache = (macs, now)
+            self._local_hci_warned = False
+            return macs
+
+        # Warn once per outage rather than on every reconnect attempt.
+        if not self._local_hci_warned:
+            self._local_hci_warned = True
+            if failure is not None:
+                _LOGGER.warning(
+                    "Could not enumerate local HCI adapters via D-Bus (%s) — "
+                    "adapter pinning is unavailable until this recovers",
+                    failure,
+                )
+            else:
+                _LOGGER.warning(
+                    "BlueZ reports no local HCI adapters on this host — "
+                    "GP-SC pairing requires a direct BLE adapter",
+                )
         return macs
+
+    async def _async_remove_bluez_bond(self) -> bool:
+        """Remove the BlueZ device object (and its bond) for this address.
+
+        Talks to BlueZ over D-Bus rather than shelling out to bluetoothctl:
+        that binary is not guaranteed to exist inside the Home Assistant
+        container, and when it is missing the removal silently does nothing —
+        leaving the controller in the AuthenticationFailed loop this is meant
+        to break.  Returns True if BlueZ removed at least one device object.
+        """
+        removed = False
+        try:
+            from dbus_fast import BusType, Message, MessageType  # noqa: PLC0415
+            from dbus_fast.aio import MessageBus  # noqa: PLC0415
+
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            try:
+                reply = await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/",
+                        interface="org.freedesktop.DBus.ObjectManager",
+                        member="GetManagedObjects",
+                    )
+                )
+                if reply.message_type == MessageType.ERROR or not reply.body:
+                    _LOGGER.warning(
+                        "Could not list BlueZ objects to clear the bond for %s (%s)",
+                        self._address,
+                        getattr(reply, "error_name", "no reply"),
+                    )
+                    return False
+
+                target = self._address.upper()
+                for path, interfaces in reply.body[0].items():
+                    device = interfaces.get("org.bluez.Device1")
+                    if device is None:
+                        continue
+                    addr = device.get("Address")
+                    if addr is not None and hasattr(addr, "value"):
+                        addr = addr.value
+                    if addr is None or str(addr).upper() != target:
+                        continue
+                    adapter_path = path.rsplit("/", 1)[0]
+                    rm = await bus.call(
+                        Message(
+                            destination="org.bluez",
+                            path=adapter_path,
+                            interface="org.bluez.Adapter1",
+                            member="RemoveDevice",
+                            signature="o",
+                            body=[path],
+                        )
+                    )
+                    if rm.message_type == MessageType.ERROR:
+                        _LOGGER.warning(
+                            "BlueZ refused to remove %s from %s: %s",
+                            path, adapter_path, rm.error_name,
+                        )
+                    else:
+                        removed = True
+                        _LOGGER.info(
+                            "Cleared BlueZ bond for %s on adapter %s",
+                            self._address, adapter_path,
+                        )
+            finally:
+                bus.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not clear the BlueZ bond for %s via D-Bus (%s: %s) — "
+                "the controller may keep rejecting pairing until the bond is "
+                "removed manually",
+                self._address, type(exc).__name__, exc,
+            )
+            return False
+
+        if not removed:
+            _LOGGER.info(
+                "No BlueZ device object for %s — nothing to unbond; the stale "
+                "bond is on the controller's side and needs an idle period",
+                self._address,
+            )
+        return removed
 
     def _source_is_local_hci(self, source: str, local_macs: set[str]) -> bool:
         """Return True if *source* is a known local BlueZ HCI adapter MAC."""
         return source.upper() in local_macs
+
+    def _sc_scanner_candidates(self) -> list[Any]:
+        """Return the connectable scanners whose *live* cache holds this address.
+
+        This is deliberately not the manager's advertisement history: the
+        history keeps an address for minutes after bleak has dropped it from
+        the scanner cache (BlueZ emits InterfacesRemoved when a bond is
+        cleared, which is exactly what the stale-bond path does).  A BLEDevice
+        rebuilt from history has no backend that can reach it, which surfaces
+        as "No backend with an available connection slot".
+        """
+        try:
+            return bluetooth.async_scanner_devices_by_address(
+                self.hass, self._address, connectable=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "Scanner lookup failed for %s (%s: %s) — treating as no live sources",
+                self._address, type(exc).__name__, exc,
+            )
+            return []
+
+    async def _async_wait_for_advertisement(
+        self, timeout: float = ADVERTISEMENT_WAIT
+    ) -> bool:
+        """Wait for a fresh advertisement from this address.
+
+        Also requests active scanning for the duration, which is what prompts
+        BlueZ to recreate a device object it was told to remove.  On Linux,
+        Home Assistant's default "auto" scanning mode resolves to passive.
+        """
+        _LOGGER.debug(
+            "Waiting up to %.0fs for an advertisement from %s", timeout, self._address
+        )
+        try:
+            await bluetooth.async_process_advertisements(
+                self.hass,
+                lambda service_info: True,
+                {"address": self._address, "connectable": True},
+                bluetooth.BluetoothScanningMode.ACTIVE,
+                int(timeout),
+            )
+        except TimeoutError:
+            _LOGGER.debug("No advertisement from %s within %.0fs", self._address, timeout)
+            return False
+        return True
+
+    async def _async_pick_sc_device(self) -> tuple[Any | None, str | None]:
+        """Pick the BLE device and source to use for a GP-SC connect.
+
+        GP-SC requires LE Legacy Just Works pairing.  SMP runs at the radio
+        level and ESPHome BT proxies cannot relay the key exchange back to
+        BlueZ on the HA host, so the connection must go through a local HCI
+        adapter.  Returns (device, source); source is None when no local
+        adapter could be confirmed and a last-resort device is returned.
+        """
+        candidates = self._sc_scanner_candidates()
+        if not candidates:
+            # Most likely the address was just dropped from bleak's cache by a
+            # bond clear.  Wait for it to be advertised again rather than
+            # connecting to a history entry that cannot be reached.
+            if await self._async_wait_for_advertisement():
+                candidates = self._sc_scanner_candidates()
+
+        local_macs = await self._async_get_local_hci_macs()
+        local_candidates = [
+            c for c in candidates
+            if self._source_is_local_hci(c.scanner.source, local_macs)
+        ]
+
+        # A BLE bond is keyed to the adapter that created it.  On a host with
+        # several HCI adapters, reconnecting through a different one presents
+        # an unfamiliar peer and the controller rejects pairing with
+        # AuthenticationFailed.  Prefer the adapter that completed the pairing
+        # last time; fall back to any local adapter if it is gone.
+        bonded_source: str | None = self._entry.options.get(CONF_BONDED_SOURCE)
+        local_candidate = None
+        if bonded_source:
+            local_candidate = next(
+                (c for c in local_candidates if c.scanner.source == bonded_source),
+                None,
+            )
+            if local_candidate is None and local_candidates:
+                _LOGGER.warning(
+                    "SC device %s: bonded adapter %s unavailable (present: %s) — "
+                    "using another local adapter; a re-pair will likely be needed",
+                    self._address,
+                    bonded_source,
+                    [c.scanner.source for c in local_candidates],
+                )
+        if local_candidate is None:
+            local_candidate = local_candidates[0] if local_candidates else None
+
+        if local_candidate is not None:
+            _LOGGER.info(
+                "SC device %s: connecting via local HCI adapter %s%s "
+                "(required for Just Works BLE pairing)",
+                self._address,
+                local_candidate.scanner.source,
+                " [pinned]" if local_candidate.scanner.source == bonded_source else "",
+            )
+            return local_candidate.ble_device, local_candidate.scanner.source
+
+        # No local adapter to use.  Say which of the three distinct situations
+        # this is — they need very different responses from the operator.
+        sources = [c.scanner.source for c in candidates]
+        if not candidates:
+            _LOGGER.warning(
+                "SC device %s: not in any connectable scanner's live cache and no "
+                "advertisement seen within %.0fs — the controller may be out of "
+                "range, asleep, or still connected to the vendor app",
+                self._address, ADVERTISEMENT_WAIT,
+            )
+        elif not local_macs:
+            _LOGGER.warning(
+                "SC device %s: seen by %s, but the local BlueZ adapter list is "
+                "unavailable, so none of them can be confirmed as a direct "
+                "adapter — attempting anyway; if this repeats, check that the "
+                "Home Assistant container can reach the BlueZ D-Bus system bus",
+                self._address, sources,
+            )
+        else:
+            _LOGGER.warning(
+                "SC device %s: seen only by %s, none of which is a local adapter "
+                "(local adapters here: %s). Just Works pairing cannot be relayed "
+                "through an ESPHome proxy — bring the controller within range of "
+                "the Home Assistant host's own BLE adapter",
+                self._address, sources, sorted(local_macs),
+            )
+
+        # Last resort: whatever the manager offers.  It may still be the right
+        # adapter (e.g. the D-Bus list was unavailable), so this is worth one
+        # attempt — but do not pin a bond to a source we could not verify.
+        return (
+            bluetooth.async_ble_device_from_address(
+                self.hass, self._address, connectable=True
+            ),
+            None,
+        )
 
     # ------------------------------------------------------------------
     # Connect / disconnect
@@ -256,68 +515,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         device = None
 
         if self._is_sc:
-            # GP-SC requires LE Legacy Just Works BLE pairing.  SMP pairing
-            # happens at the radio level and ESPHome BT proxies cannot relay
-            # the key exchange back to BlueZ on the HA host — so we must
-            # connect through a local HCI adapter.  Prefer the first local
-            # adapter candidate (D-Bus confirmed BlueZ adapter) over any proxy.
-            try:
-                candidates = bluetooth.async_scanner_devices_by_address(
-                    self.hass, self._address, connectable=True
-                )
-            except Exception:  # noqa: BLE001
-                candidates = []
-
-            local_macs = await self._async_get_local_hci_macs()
-            local_candidates = [
-                c for c in candidates
-                if self._source_is_local_hci(c.scanner.source, local_macs)
-            ]
-
-            # A BLE bond is keyed to the adapter that created it.  On a host
-            # with several HCI adapters, reconnecting through a different one
-            # presents an unfamiliar peer and the controller rejects pairing
-            # with AuthenticationFailed.  Prefer the adapter that completed the
-            # pairing last time; fall back to any local adapter if it is gone.
-            bonded_source: str | None = self._entry.options.get(CONF_BONDED_SOURCE)
-            local_candidate = None
-            if bonded_source:
-                local_candidate = next(
-                    (c for c in local_candidates if c.scanner.source == bonded_source),
-                    None,
-                )
-                if local_candidate is None and local_candidates:
-                    _LOGGER.warning(
-                        "SC device %s: bonded adapter %s unavailable (present: %s) — "
-                        "using another local adapter; a re-pair will likely be needed",
-                        self._address,
-                        bonded_source,
-                        [c.scanner.source for c in local_candidates],
-                    )
-            if local_candidate is None:
-                local_candidate = local_candidates[0] if local_candidates else None
-
-            if local_candidate is not None:
-                device = local_candidate.ble_device
-                self._current_connect_source = local_candidate.scanner.source
-                _LOGGER.info(
-                    "SC device %s: connecting via local HCI adapter %s%s "
-                    "(required for Just Works BLE pairing)",
-                    self._address,
-                    local_candidate.scanner.source,
-                    " [pinned]" if local_candidate.scanner.source == bonded_source else "",
-                )
-            else:
-                _LOGGER.warning(
-                    "SC device %s: no local HCI adapter visible in scanner pool "
-                    "(sources: %s) — pairing through a proxy will likely fail; "
-                    "ensure the HA host has a direct BLE adapter",
-                    self._address,
-                    [c.scanner.source for c in candidates],
-                )
-                device = bluetooth.async_ble_device_from_address(
-                    self.hass, self._address, connectable=True
-                )
+            device, self._current_connect_source = await self._async_pick_sc_device()
         else:
             device = bluetooth.async_ble_device_from_address(
                 self.hass, self._address, connectable=True
@@ -352,10 +550,12 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         if self._is_sc:
             try:
                 await client.pair()
+                self._bond_failures = 0
                 _LOGGER.info("BLE Just Works pairing completed for %s", self._address)
             except Exception as exc:  # noqa: BLE001
                 exc_str = str(exc)
                 if any(k in exc_str for k in ("AlreadyExists", "Already Exists", "already")):
+                    self._bond_failures = 0
                     _LOGGER.info("Device %s already bonded in BlueZ", self._address)
                 elif any(k in exc_str for k in ("AuthenticationFailed", "Authentication Failed")):
                     # BlueZ has a stale bond key that the device no longer recognises.
@@ -365,22 +565,26 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         "removing BlueZ bond for fresh Just Works pair",
                         self._address,
                     )
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "bluetoothctl", "remove", self._address,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        await asyncio.wait_for(proc.wait(), timeout=5.0)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    await self._async_remove_bluez_bond()
                     # The controller only purges its own stale bond entry after a
-                    # prolonged idle period, so hold off that long before retrying.
+                    # prolonged idle period — field logs show it taking upwards of
+                    # ten minutes — so the wait escalates with each consecutive
+                    # failure instead of hammering a fixed short retry.
                     # Record a deadline instead of sleeping here: the device drops
                     # the link immediately on auth failure, so _on_disconnect has
                     # already queued a reconnect by this point and a sleep in this
                     # task would not gate it.  _schedule_reconnect enforces it.
-                    self._bond_cooldown_until = time.monotonic() + BOND_RETRY_COOLDOWN
+                    self._bond_failures += 1
+                    cooldown = min(
+                        BOND_RETRY_COOLDOWN * (2 ** (self._bond_failures - 1)),
+                        BOND_RETRY_COOLDOWN_CAP,
+                    )
+                    _LOGGER.info(
+                        "Holding %s idle for %.0fs so the controller can drop its "
+                        "own stale bond (consecutive failures: %d)",
+                        self._address, cooldown, self._bond_failures,
+                    )
+                    self._bond_cooldown_until = time.monotonic() + cooldown
                     # Deliberately leave _reconnect_failures alone: resetting it
                     # pinned the backoff at the base delay, so repeated bond
                     # failures hammered the adapter instead of backing off.
