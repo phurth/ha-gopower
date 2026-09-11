@@ -86,7 +86,7 @@ Key field indices:
 | 14 | serial | hex string | →decimal | |
 | 16 | temperatureC | signed int | — | |
 | 17 | temperatureF | signed int | — | |
-| 19 | ampHoursToday | Ah | ×Vbat → Wh | |
+| 19 | ampHoursToday | Ah | — | Whole Ah, solar only; resets daily at midnight. Exposed as `Ah`, not converted to Wh. |
 
 ### 5.2 GP-PWM-30-UL — 569a Protocol
 
@@ -106,7 +106,7 @@ Key field indices:
 | 10 | batteryVoltage | mV | ÷1000 → V | Battery terminal voltage |
 | 12 | stateOfCharge | % | — | |
 | 13 | temperatureC | signed string | — | e.g. `+23` or `-05` |
-| 28 | batteryAmpHours | cumulative Ah | — | Whole Ah; verified by counter increment rate vs measured current |
+| 28 | batteryAmpHours | cumulative Ah | — | Whole Ah, solar only, lifetime. Verified by counter rate vs measured current. Exposed as `Ah`, not converted to Wh. |
 
 ### 5.3 Power Calculation
 

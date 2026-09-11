@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .coordinator import GoPowerCoordinator
@@ -19,8 +21,32 @@ PLATFORMS: list[str] = [
 ]
 
 
+# Entities removed in 1.1.0.  Both derived Wh from an amp-hour counter times the
+# *present* battery voltage — a figure the controller never measured, over a
+# window (a day, or the controller's whole life) during which that voltage did
+# not hold.  Left in place they linger as "unavailable" rows on every
+# dashboard, so they are cleaned out of the registry on upgrade.
+_REMOVED_SENSOR_KEYS: tuple[str, ...] = ("cumulative_energy", "energy")
+
+
+def _purge_removed_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop registry entries for sensors this version no longer creates."""
+    address = entry.data.get(CONF_ADDRESS)
+    if not address:
+        return
+    registry = er.async_get(hass)
+    mac = address.replace(":", "").lower()
+    for key in _REMOVED_SENSOR_KEYS:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{mac}_{key}")
+        if entity_id:
+            _LOGGER.info("Removing obsolete entity %s", entity_id)
+            registry.async_remove(entity_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up GoPower from a config entry."""
+    _purge_removed_entities(hass, entry)
+
     coordinator = GoPowerCoordinator(hass, entry)
 
     hass.data.setdefault(DOMAIN, {})

@@ -32,7 +32,6 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
-    UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
 )
@@ -52,6 +51,10 @@ class GoPowerSensorDescription(SensorEntityDescription):
     """Describe a GoPower sensor entity."""
 
     value_fn: Callable[[GoPowerState], float | int | str | None]
+    # Restrict to one protocol variant: "SC", "PWM", or None for both.  Used
+    # where the two controllers report genuinely different quantities rather
+    # than the same quantity with one side missing.
+    variant: str | None = None
 
 
 SENSOR_DESCRIPTIONS: tuple[GoPowerSensorDescription, ...] = (
@@ -113,14 +116,34 @@ SENSOR_DESCRIPTIONS: tuple[GoPowerSensorDescription, ...] = (
         icon="mdi:thermometer",
         value_fn=lambda s: s.temperature_c,
     ),
+    # Amp-hours as the controller counts them.  Deliberately NOT converted to
+    # Wh: the counters span a day (PWM) or the controller's whole life (SC), so
+    # multiplying by the present battery voltage would invent an energy figure
+    # from a voltage that did not apply.  For Wh, add an Integration - Riemann
+    # sum helper over the Charge Power sensor; see the README.
+    #
+    # These are also not interchangeable with a battery shunt's amp-hours: a
+    # shunt totals net battery current from every source, including the
+    # converter on shore power, while these count solar production only.
     GoPowerSensorDescription(
-        key="cumulative_energy",
-        name="Cumulative Energy",
-        native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
+        key="amp_hours_today",
+        name="Amp Hours Today",
+        variant="PWM",
+        native_unit_of_measurement="Ah",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:counter",
+        value_fn=lambda s: s.amp_hours,
+    ),
+    GoPowerSensorDescription(
+        key="cumulative_amp_hours",
+        name="Cumulative Amp Hours",
+        variant="SC",
+        native_unit_of_measurement="Ah",
         state_class=SensorStateClass.TOTAL_INCREASING,
-        icon="mdi:lightning-bolt",
-        value_fn=lambda s: s.energy_wh,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:counter",
+        value_fn=lambda s: s.amp_hours,
     ),
     # Diagnostic sensors
     GoPowerSensorDescription(
@@ -153,9 +176,11 @@ async def async_setup_entry(
     coordinator: GoPowerCoordinator = hass.data[DOMAIN][entry.entry_id]
     address = entry.data[CONF_ADDRESS]
 
+    variant = "SC" if coordinator.is_sc else "PWM"
     async_add_entities(
         GoPowerSensor(coordinator, address, desc)
         for desc in SENSOR_DESCRIPTIONS
+        if desc.variant in (None, variant)
     )
 
 

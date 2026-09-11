@@ -94,7 +94,7 @@ class GoPowerState:
     state_of_charge: int = 0       # %
     temperature_c: int = 0         # °C
     temperature_f: int = 0         # °F
-    energy_wh: int = 0             # Wh (Ah × battery voltage)
+    amp_hours: int = 0             # Ah, as counted by the controller
     firmware: str = ""
     serial: str = ""
     model_name: str = ""
@@ -142,9 +142,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Set after clearing a stale BlueZ bond so the controller gets an
         # uninterrupted idle window to drop its own bond entry.
         self._bond_cooldown_until: float = 0.0
-        # Energy high-water mark; see _monotonic_energy_wh.
-        self._energy_high_water: int = 0
-        self._last_amp_hours_raw: int = 0
 
         # Consecutive stale-bond clears, used to escalate the cooldown.
         self._bond_failures: int = 0
@@ -202,6 +199,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def model_name(self) -> str:
         """Return a human-readable model name for DeviceInfo."""
         return "GP-PWM-30-UL" if self._is_sc else "GP-PWM-30-SB"
+
+    @property
+    def is_sc(self) -> bool:
+        """True for the 569a (GP-PWM-30-UL) variant."""
+        return self._is_sc
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1040,16 +1042,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             _LOGGER.exception("Failed to parse GoPower response")
             return
 
-        # Smooth the voltage-driven wobble out of the energy total before it
-        # reaches the recorder (both variants derive Wh from an Ah counter).
-        ah_index = SC_FIELD_AMP_HOURS if self._is_sc else FIELD_AMP_HOURS_TODAY
-        try:
-            raw_ah_int = int(state.raw_fields[ah_index])
-        except (IndexError, TypeError, ValueError):
-            # Unparseable counter: treat as unchanged so the mark is only held,
-            # never released on bad data.
-            raw_ah_int = self._last_amp_hours_raw
-        state.energy_wh = self._monotonic_energy_wh(raw_ah_int, state.energy_wh)
 
         self.state = state
 
@@ -1091,28 +1083,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 )
         self.async_set_updated_data(state)
 
-    def _monotonic_energy_wh(self, amp_hours_raw: int, energy_wh: int) -> int:
-        """Return an energy total that only falls when the counter itself resets.
-
-        energy_wh is an Ah counter scaled by the *live* battery voltage, so it
-        drifts down whenever the battery sags even though no energy was
-        un-delivered.  A sensor with state_class total_increasing treats any
-        decrease as a counter wrap and adds the whole new value to the
-        long-term sum, so a 0.1 % voltage dip used to inject a spurious
-        multi-kWh jump into statistics.
-
-        Hold a high-water mark and release it only when the underlying Ah
-        counter drops — a real reset (daily rollover, or the Reset History
-        button), which total_increasing is designed to handle.
-        """
-        if amp_hours_raw < self._last_amp_hours_raw:
-            self._energy_high_water = energy_wh
-        else:
-            self._energy_high_water = max(self._energy_high_water, energy_wh)
-        self._last_amp_hours_raw = amp_hours_raw
-        return self._energy_high_water
-
-    @staticmethod
     def _parse_fields(fields: list[str]) -> GoPowerState:
         """Parse semicolon-delimited fields into a GoPowerState."""
 
@@ -1158,7 +1128,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # (17 the day before, 324 that week) — as Ah×100 those would be 0.04 and
         # 0.17 Ah, which no solar controller produces in a day.
         amp_hours_today = _int_field(FIELD_AMP_HOURS_TODAY)
-        energy_wh = int(amp_hours_today * battery_voltage_v)
 
         # Serial: hex string → decimal
         serial_str = ""
@@ -1175,7 +1144,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             state_of_charge=_int_field(FIELD_SOC),
             temperature_c=_signed_temp(FIELD_TEMP_C),
             temperature_f=_signed_temp(FIELD_TEMP_F),
-            energy_wh=energy_wh,
+            amp_hours=amp_hours_today,
             firmware=fields[FIELD_FIRMWARE] if FIELD_FIRMWARE < len(fields) else "",
             serial=serial_str,
             model_name="GP-PWM-30-SB",
@@ -1228,7 +1197,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # 9 A the counter advanced 4 units in 26 minutes (3.9 Ah), so one unit is
         # one Ah.  Were it Ah×100 the same interval would have advanced ~390.
         amp_hours_cumulative = _int_field(SC_FIELD_AMP_HOURS)
-        energy_wh = int(amp_hours_cumulative * battery_voltage_v)
 
         return GoPowerState(
             solar_voltage=None,      # Not reported by SC protocol
@@ -1238,7 +1206,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             state_of_charge=_int_field(SC_FIELD_SOC),
             temperature_c=_signed_temp(SC_FIELD_TEMP_C),
             temperature_f=0,         # Not separately available in SC protocol
-            energy_wh=energy_wh,
+            amp_hours=amp_hours_cumulative,
             firmware=firmware,
             serial="",               # Not available in SC protocol
             model_name="GP-PWM-30-UL",

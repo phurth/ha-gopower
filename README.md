@@ -25,9 +25,10 @@ Two hardware variants use different BLE protocols and expose different data:
 | Battery Voltage | ✓ | ✓ | |
 | State of Charge | ✓ | ✓ | |
 | Temperature | ✓ | ✓ | |
-| Energy Today | ✓ | — | Amp-hours × battery voltage. Not available on GP-PWM-30-UL. |
 | Connected | ✓ | ✓ | Binary sensor |
 | Data Healthy | ✓ | ✓ | Binary sensor |
+| Amp Hours Today | ✓ | — | Diagnostic; solar amp-hours counted by the controller, resets at midnight |
+| Cumulative Amp Hours | — | ✓ | Diagnostic; lifetime solar amp-hours counted by the controller |
 | Model Number | ✓ | ✓ | Diagnostic |
 | Firmware Version | ✓ | ✓ | Diagnostic |
 | Serial Number | ✓ | — | Diagnostic; not transmitted by GP-PWM-30-UL. |
@@ -37,6 +38,26 @@ Two hardware variants use different BLE protocols and expose different data:
 ### Note on Charge Power vs Solar Power
 
 For a PWM controller the solar panel connects directly to the battery during the on-phase of the PWM cycle. The panel open-circuit voltage (~18–22 V) is higher than the battery voltage (~12–14 V); the voltage difference is dissipated as heat in the switching transistor. The energy actually stored in the battery is `battery_voltage × charge_current`, not `panel_voltage × charge_current`. Using panel voltage for power would overstate by roughly `Vpanel / Vbattery` (~30–60 %). Charge Power uses the battery-side calculation for accurate HA energy statistics.
+
+## Energy figures
+
+The integration reports **power, current and voltage**, not energy. To get kWh for the
+Energy dashboard, add an integration helper over the Charge Power sensor:
+
+> Settings → Devices & Services → **Helpers** → Create helper →
+> **Integration - Riemann sum integral** → source `sensor.<name>_charge_power`,
+> method **Left Riemann sum**, precision 2, time unit **Hours**.
+
+That yields a proper `total_increasing` energy sensor the Energy dashboard accepts.
+
+The controller's own amp-hour counters are exposed as diagnostics in `Ah`, deliberately not
+converted to Wh: those counters span a day (GP-PWM-30-SB) or the controller's entire service
+life (GP-PWM-30-UL), so multiplying by the present battery voltage would invent an energy
+figure from a voltage that never applied across that window.
+
+Note these counters are **solar production only**. A battery shunt's amp-hours are not the
+same number — a shunt totals net battery current from every source, including the converter
+when on shore power.
 
 ## Requirements
 

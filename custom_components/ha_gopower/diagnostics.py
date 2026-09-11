@@ -51,7 +51,7 @@ async def async_get_config_entry_diagnostics(
             "state_of_charge_pct": s.state_of_charge,
             "temperature_c": s.temperature_c,
             "temperature_f": s.temperature_f,
-            "energy_wh": s.energy_wh,
+            "amp_hours": s.amp_hours,
             "firmware": s.firmware,
             "serial": s.serial,
         }
