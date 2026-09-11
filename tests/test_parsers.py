@@ -97,7 +97,6 @@ def test_pwm_frame_parses_to_expected_values() -> None:
     assert state.state_of_charge == 100
     assert state.temperature_c == 32
     assert state.serial == "375"          # field 14 is hex 0x177
-    assert state.amp_hours == 4           # whole Ah, not Ah x100
 
 
 def test_sc_frame_parses_to_expected_values() -> None:
@@ -107,7 +106,6 @@ def test_sc_frame_parses_to_expected_values() -> None:
     assert state.state_of_charge == 100
     assert state.temperature_c == 32
     assert state.solar_voltage is None    # 569a carries no panel voltage
-    assert state.amp_hours == 56173       # whole Ah, lifetime
 
 
 def test_power_is_battery_side_not_panel_side() -> None:

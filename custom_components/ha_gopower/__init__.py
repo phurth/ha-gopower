@@ -26,7 +26,12 @@ PLATFORMS: list[str] = [
 # window (a day, or the controller's whole life) during which that voltage did
 # not hold.  Left in place they linger as "unavailable" rows on every
 # dashboard, so they are cleaned out of the registry on upgrade.
-_REMOVED_SENSOR_KEYS: tuple[str, ...] = ("cumulative_energy", "energy")
+_REMOVED_SENSOR_KEYS: tuple[str, ...] = (
+    "cumulative_energy",
+    "energy",
+    "amp_hours_today",
+    "cumulative_amp_hours",
+)
 
 
 def _purge_removed_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:

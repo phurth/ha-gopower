@@ -27,8 +27,6 @@ Two hardware variants use different BLE protocols and expose different data:
 | Temperature | ✓ | ✓ | |
 | Connected | ✓ | ✓ | Binary sensor |
 | Data Healthy | ✓ | ✓ | Binary sensor |
-| Amp Hours Today | ✓ | — | Diagnostic; solar amp-hours counted by the controller, resets at midnight |
-| Cumulative Amp Hours | — | ✓ | Diagnostic; lifetime solar amp-hours counted by the controller |
 | Model Number | ✓ | ✓ | Diagnostic |
 | Firmware Version | ✓ | ✓ | Diagnostic |
 | Serial Number | ✓ | — | Diagnostic; not transmitted by GP-PWM-30-UL. |
@@ -50,14 +48,14 @@ Energy dashboard, add an integration helper over the Charge Power sensor:
 
 That yields a proper `total_increasing` energy sensor the Energy dashboard accepts.
 
-The controller's own amp-hour counters are exposed as diagnostics in `Ah`, deliberately not
-converted to Wh: those counters span a day (GP-PWM-30-SB) or the controller's entire service
-life (GP-PWM-30-UL), so multiplying by the present battery voltage would invent an energy
-figure from a voltage that never applied across that window.
+The controller's own amp-hour counters are **not** exposed. They accumulate on the
+controller's schedule — through the day on a GP-PWM-30-SB, across its whole service life on a
+GP-PWM-30-UL — and neither reconciles with Home Assistant's statistics model, which expects
+either an instantaneous measurement or a total it can attribute to a known period. Converting
+them to Wh would be worse still: it needs a battery voltage that did not hold across the
+window being summed.
 
-Note these counters are **solar production only**. A battery shunt's amp-hours are not the
-same number — a shunt totals net battery current from every source, including the converter
-when on shore power.
+They remain visible in the integration's diagnostics output for protocol debugging.
 
 ## Requirements
 

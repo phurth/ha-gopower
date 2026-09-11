@@ -94,7 +94,6 @@ class GoPowerState:
     state_of_charge: int = 0       # %
     temperature_c: int = 0         # °C
     temperature_f: int = 0         # °F
-    amp_hours: int = 0             # Ah, as counted by the controller
     firmware: str = ""
     serial: str = ""
     model_name: str = ""
@@ -199,11 +198,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def model_name(self) -> str:
         """Return a human-readable model name for DeviceInfo."""
         return "GP-PWM-30-UL" if self._is_sc else "GP-PWM-30-SB"
-
-    @property
-    def is_sc(self) -> bool:
-        """True for the 569a (GP-PWM-30-UL) variant."""
-        return self._is_sc
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1128,7 +1122,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # on hardware: a controller reading 4 here had harvested 4 Ah that day
         # (17 the day before, 324 that week) — as Ah×100 those would be 0.04 and
         # 0.17 Ah, which no solar controller produces in a day.
-        amp_hours_today = _int_field(FIELD_AMP_HOURS_TODAY)
 
         # Serial: hex string → decimal
         serial_str = ""
@@ -1145,7 +1138,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             state_of_charge=_int_field(FIELD_SOC),
             temperature_c=_signed_temp(FIELD_TEMP_C),
             temperature_f=_signed_temp(FIELD_TEMP_F),
-            amp_hours=amp_hours_today,
             firmware=fields[FIELD_FIRMWARE] if FIELD_FIRMWARE < len(fields) else "",
             serial=serial_str,
             model_name="GP-PWM-30-SB",
@@ -1197,7 +1189,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Field [28] is whole amp-hours.  Verified by counter rate: at a measured
         # 9 A the counter advanced 4 units in 26 minutes (3.9 Ah), so one unit is
         # one Ah.  Were it Ah×100 the same interval would have advanced ~390.
-        amp_hours_cumulative = _int_field(SC_FIELD_AMP_HOURS)
 
         return GoPowerState(
             solar_voltage=None,      # Not reported by SC protocol
@@ -1207,7 +1198,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             state_of_charge=_int_field(SC_FIELD_SOC),
             temperature_c=_signed_temp(SC_FIELD_TEMP_C),
             temperature_f=0,         # Not separately available in SC protocol
-            amp_hours=amp_hours_cumulative,
             firmware=firmware,
             serial="",               # Not available in SC protocol
             model_name="GP-PWM-30-UL",
