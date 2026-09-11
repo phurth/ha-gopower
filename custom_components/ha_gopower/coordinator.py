@@ -1084,7 +1084,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                     state.firmware,
                     state.serial,
                 )
-
+                _LOGGER.debug(
+                    "PWM raw fields %s: %s",
+                    self._address,
+                    "|".join(f"{i}={v}" for i, v in enumerate(fields[:32])),
+                )
         self.async_set_updated_data(state)
 
     def _monotonic_energy_wh(self, amp_hours_raw: int, energy_wh: int) -> int:
@@ -1149,10 +1153,12 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         solar_power_w = battery_voltage_v * solar_current_a
 
         # Ah → Wh
-        # Field[19] is fixed-point Ah×100 (e.g. raw 150 = 1.50 Ah), so divide
-        # by 100 first to get whole Ah before converting to Wh.
+        # Field[19] is whole amp-hours, not a fixed-point Ah×100 value.  Verified
+        # on hardware: a controller reading 4 here had harvested 4 Ah that day
+        # (17 the day before, 324 that week) — as Ah×100 those would be 0.04 and
+        # 0.17 Ah, which no solar controller produces in a day.
         amp_hours_today = _int_field(FIELD_AMP_HOURS_TODAY)
-        energy_wh = int((amp_hours_today / 100.0) * battery_voltage_v)
+        energy_wh = int(amp_hours_today * battery_voltage_v)
 
         # Serial: hex string → decimal
         serial_str = ""
@@ -1218,10 +1224,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             else ""
         )
 
-        # Field [28]: cumulative Ah × 100 (same encoding as PWM daily Ah field).
-        # Divide by 100 to get whole Ah, then multiply by battery voltage for Wh.
+        # Field [28] is whole amp-hours.  Verified by counter rate: at a measured
+        # 9 A the counter advanced 4 units in 26 minutes (3.9 Ah), so one unit is
+        # one Ah.  Were it Ah×100 the same interval would have advanced ~390.
         amp_hours_cumulative = _int_field(SC_FIELD_AMP_HOURS)
-        energy_wh = int((amp_hours_cumulative / 100.0) * battery_voltage_v)
+        energy_wh = int(amp_hours_cumulative * battery_voltage_v)
 
         return GoPowerState(
             solar_voltage=None,      # Not reported by SC protocol

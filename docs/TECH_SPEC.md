@@ -106,7 +106,7 @@ Key field indices:
 | 10 | batteryVoltage | mV | ÷1000 → V | Battery terminal voltage |
 | 12 | stateOfCharge | % | — | |
 | 13 | temperatureC | signed string | — | e.g. `+23` or `-05` |
-| 28 | batteryAmpHours | cumulative Ah | — | Units unconfirmed |
+| 28 | batteryAmpHours | cumulative Ah | — | Whole Ah; verified by counter increment rate vs measured current |
 
 ### 5.3 Power Calculation
 

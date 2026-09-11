@@ -57,7 +57,7 @@ FIELD_SOLAR_VOLTAGE = 11     # mV — divide by 1000 → V
 FIELD_SERIAL = 14             # hex string → int → decimal string
 FIELD_TEMP_C = 16             # signed int (e.g. "+06" or "-05")
 FIELD_TEMP_F = 17             # signed int
-FIELD_AMP_HOURS_TODAY = 19   # Ah×100 (fixed-point) — divide by 100 for Ah, then multiply by battery voltage → Wh; resets daily at midnight
+FIELD_AMP_HOURS_TODAY = 19   # Ah (whole amp-hours) — multiply by battery voltage → Wh; resets daily at midnight
 FIELD_AMP_HOURS_YESTERDAY = 20  # Ah (not published in Android app)
 FIELD_AMP_HOURS_WEEK = 24       # Ah (not published in Android app)
 
@@ -71,7 +71,7 @@ SC_FIELD_FIRMWARE = 6          # firmware version string
 SC_FIELD_BATTERY_VOLTAGE = 10  # mV → divide by 1000 → V
 SC_FIELD_SOC = 12              # state of charge (%)
 SC_FIELD_TEMP_C = 13           # signed temperature string e.g. "+23" or "-05"
-SC_FIELD_AMP_HOURS = 28        # cumulative battery amp-hours (Ah × 100, same encoding as PWM FIELD_AMP_HOURS_TODAY)
+SC_FIELD_AMP_HOURS = 28        # cumulative battery amp-hours (whole Ah, verified against counter rate)
 
 # ---------------------------------------------------------------------------
 # Command byte strings (ASCII)
