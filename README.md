@@ -41,8 +41,9 @@ For a PWM controller the solar panel connects directly to the battery during the
 The integration reports **power, current and voltage**, not energy. For kWh — and for the
 Energy dashboard — add a Riemann sum helper over the Charge Power sensor:
 
-> Settings → Devices & Services → **Helpers** → **Create helper** →
-> **Integration - Riemann sum integral sensor**
+> Settings → Devices & Services → **Helpers** → **Create helper** → **Integral sensor**
+
+(The dialog that opens is headed "Create Riemann sum integral sensor" — same thing.)
 
 | Field | Value |
 |-------|-------|
