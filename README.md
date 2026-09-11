@@ -31,7 +31,6 @@ Two hardware variants use different BLE protocols and expose different data:
 | Firmware Version | ✓ | ✓ | Diagnostic |
 | Serial Number | ✓ | — | Diagnostic; not transmitted by GP-PWM-30-UL. |
 | Reboot Controller | ✓ | ✓ | Button |
-| Reset History | ✓ | ✓ | Button |
 
 ### Note on Charge Power vs Solar Power
 

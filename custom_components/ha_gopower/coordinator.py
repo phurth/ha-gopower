@@ -1230,15 +1230,6 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         await self.async_send_command(REBOOT_COMMAND)
         _LOGGER.info("Reboot command sent")
 
-    async def async_reset_history(self) -> None:
-        """Send unlock + reset history sequence."""
-        from .const import RESET_HISTORY_COMMAND
-
-        _LOGGER.info("Sending reset history to GoPower %s", self._address)
-        await self.async_send_command(UNLOCK_COMMAND)
-        await asyncio.sleep(UNLOCK_DELAY)
-        await self.async_send_command(RESET_HISTORY_COMMAND)
-        _LOGGER.info("Reset history command sent")
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator required method

@@ -33,19 +33,24 @@ _REMOVED_SENSOR_KEYS: tuple[str, ...] = (
     "cumulative_amp_hours",
 )
 
+# Buttons removed in 1.3.0, keyed the same way as the sensors above.
+_REMOVED_BUTTON_KEYS: tuple[str, ...] = ("reset_history",)
+
 
 def _purge_removed_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop registry entries for sensors this version no longer creates."""
+    """Drop registry entries for entities this version no longer creates."""
     address = entry.data.get(CONF_ADDRESS)
     if not address:
         return
     registry = er.async_get(hass)
     mac = address.replace(":", "").lower()
-    for key in _REMOVED_SENSOR_KEYS:
-        entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{mac}_{key}")
-        if entity_id:
-            _LOGGER.info("Removing obsolete entity %s", entity_id)
-            registry.async_remove(entity_id)
+    for domain, keys in (("sensor", _REMOVED_SENSOR_KEYS),
+                         ("button", _REMOVED_BUTTON_KEYS)):
+        for key in keys:
+            entity_id = registry.async_get_entity_id(domain, DOMAIN, f"{mac}_{key}")
+            if entity_id:
+                _LOGGER.info("Removing obsolete entity %s", entity_id)
+                registry.async_remove(entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

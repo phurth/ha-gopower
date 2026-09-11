@@ -84,7 +84,9 @@ SC_FIELD_AMP_HOURS = 28        # whole Ah, accumulates over the controller's lif
 UNLOCK_COMMAND = b"&G++0900"
 REBOOT_COMMAND = b"&LDD0100"
 FACTORY_RESET_COMMAND = b"&LDD0000"
-RESET_HISTORY_COMMAND = b"&LDD0200"
+RESET_HISTORY_COMMAND = b"&LDD0200"  # clears the controller's Ah counters;
+# documented for reference only — no entity sends it, since the counters it
+# clears are not exposed (see v1.2.0).
 
 # ---------------------------------------------------------------------------
 # Timing (seconds)
