@@ -1083,6 +1083,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 )
         self.async_set_updated_data(state)
 
+    @staticmethod
     def _parse_fields(fields: list[str]) -> GoPowerState:
         """Parse semicolon-delimited fields into a GoPowerState."""
 
