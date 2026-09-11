@@ -38,14 +38,32 @@ For a PWM controller the solar panel connects directly to the battery during the
 
 ## Energy figures
 
-The integration reports **power, current and voltage**, not energy. To get kWh for the
-Energy dashboard, add an integration helper over the Charge Power sensor:
+The integration reports **power, current and voltage**, not energy. For kWh — and for the
+Energy dashboard — add a Riemann sum helper over the Charge Power sensor:
 
-> Settings → Devices & Services → **Helpers** → Create helper →
-> **Integration - Riemann sum integral** → source `sensor.<name>_charge_power`,
-> method **Left Riemann sum**, precision 2, time unit **Hours**.
+> Settings → Devices & Services → **Helpers** → **Create helper** →
+> **Integration - Riemann sum integral sensor**
 
-That yields a proper `total_increasing` energy sensor the Energy dashboard accepts.
+| Field | Value |
+|-------|-------|
+| Name | anything, e.g. `Solar Energy` |
+| Input sensor | `sensor.<device>_solar_power` |
+| Integration method | **Trapezoidal rule** (the default) |
+| Metric prefix | **k** for kWh — leave blank for Wh |
+| Time unit | **Hours** |
+| Precision | 2 |
+
+The resulting sensor carries `device_class: energy` and `state_class: total`, which is what
+the Energy dashboard requires.
+
+Two things worth knowing:
+
+- **The entity ID is `..._solar_power`, not `..._charge_power`.** The sensor is *named*
+  "Charge Power", but its ID predates that rename and was deliberately left alone so
+  existing automations and statistics kept working.
+- **Trapezoidal, not Left Riemann sum.** A left sum suits sources that hold a value between
+  changes; charge power varies continuously and is sampled every few seconds, so averaging
+  across each interval tracks it more closely.
 
 The controller's own amp-hour counters are **not** exposed. They accumulate on the
 controller's schedule — through the day on a GP-PWM-30-SB, across its whole service life on a
