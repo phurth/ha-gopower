@@ -26,11 +26,12 @@
   correct protocol path
 - manual MAC address path is available when discovery is incomplete
 - setup forwards platforms and starts initial connection in background
-- GP-SC entries pin the adapter that completed pairing (`bonded_source` in entry
-  options) and prefer it on reconnect; BLE bonds are per-adapter, so a
-  multi-adapter host must return to the same radio or pairing is rejected
-- the pin is persisted only after a fully working connection, so a failed
-  pairing attempt cannot lock the entry to the wrong adapter
+- GP-SC entries record the adapter that holds the bond (`bonded_source` in entry
+  options). BLE bonds are per-adapter, so a multi-adapter host must return to the
+  same radio or pairing is rejected. The record is a preference only — it does
+  not control routing; see the link verification below
+- it is persisted only after a fully working connection, so a failed pairing
+  attempt cannot point the entry at the wrong adapter
 - local adapter identity is resolved over the BlueZ D-Bus object manager; only a
   non-empty enumeration is cached, since an empty one disables pinning and routes
   SC connects to whatever source the manager offers (possibly a proxy)
@@ -38,13 +39,15 @@
   a device rebuilt from history has no reachable backend. When no live source
   holds the address the coordinator waits for a fresh advertisement, requesting
   active scanning, before falling back
-- stale bonds are cleared through `org.bluez.Adapter1.RemoveDevice` over D-Bus;
+- rejected bonds are cleared through `org.bluez.Adapter1.RemoveDevice` over D-Bus;
   a confirmed clear is followed by one immediate reconnect (queued on the next
-  event-loop iteration), which is the only sequence GP-SC controllers have been
-  observed to accept a fresh pair from
+  event-loop iteration)
 - if that retry is also rejected, an escalating idle window applies (60 s doubling
   to a 900 s cap, reset on a successful pair); an immediate retry never queues
   another, bounding the cost at one extra attempt per cycle
+- the immediate retry and idle window predate the pairing agent (below). Most of
+  the rejections they were built around came from the host refusing to pair
+  without an agent, not from the controller, so they now act only as a backstop
 - reconnect tasks detach themselves from the pending-reconnect slot once they stop
   waiting and begin connecting, so a disconnect arriving mid-connect cannot cancel
   the handler that records bond state
@@ -201,6 +204,7 @@ Timing constants:
 ## 11. Known Constraints
 
 - GP-PWM-30-UL requires local HCI adapter on the HA host; pairing cannot be performed via an ESPHome BLE proxy
+- a controller that is connected and acknowledges writes but returns no data needs a full power cycle; the stale-data watchdog does not yet back off against one, and does not fire for a link that has never produced data
 - protocol is telemetry-centric; control operations are intentionally narrow
 - GP-PWM-30-UL panel-side voltage and energy-today figures are not transmitted by the device
 

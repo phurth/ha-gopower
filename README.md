@@ -100,29 +100,57 @@ They remain visible in the integration's diagnostics output for protocol debuggi
 - **Service**: `569a1101-b87f-490c-92cb-11ba5ea5167c`
 - **Write** (`569a2001`): ASCII space (`0x20`) poll command
 - **Notify** (`569a2000`): 30-field semicolon-delimited ASCII response, terminated `\r\n`
-- **Pairing**: LE Legacy Just Works (BlueZ handles automatically via local HCI)
+- **Pairing**: LE Legacy Just Works, through a Bluetooth adapter on the Home Assistant host (not a proxy). The integration pairs automatically.
 
-## Troubleshooting GP-PWM-30-UL pairing
+## Troubleshooting GP-PWM-30-UL
 
 The 569a variant bonds at the radio level, which an ESPHome Bluetooth proxy cannot
 relay — it must connect through a Bluetooth adapter attached to the Home Assistant
-host itself. If entities stay unavailable and the log repeats
-`stale bond (AuthenticationFailed)`:
+host itself. The integration checks this after every connect and drops a link that
+landed on a proxy.
 
-- **Check which source is being used.** `connecting via local HCI adapter …` means
-  a direct adapter was found. A warning naming only proxy sources means the
-  controller is out of range of the host's own adapter.
-- **Set the adapter's scanning mode to Active** (Settings → Devices & Services →
-  Bluetooth → Configure). On Linux the default "auto" mode resolves to passive
-  scanning, which makes BlueZ slower to re-register a device after a bond is
-  cleared.
-- **Expect one or two rejections after a Home Assistant restart.** The controller
-  rejects a reconnect whenever its bond no longer matches. The integration clears
-  the BlueZ bond and immediately re-pairs, which normally recovers within a couple
-  of seconds — look for `retrying at once while the clear is fresh` followed by
-  `BLE Just Works pairing completed`.
-- **If rejections continue,** close the Go Power Connect app (a phone holding the
-  link keeps the controller busy) and power-cycle the controller.
+**Entities unavailable, log shows `connected through a Bluetooth proxy`**
+
+Home Assistant chose a proxy because no adapter on the host could reach the
+controller at that moment. The integration retries on its own. If the message
+keeps repeating, the controller is out of range of the host's adapter, or that
+adapter is not accepting connections.
+
+**Entities unavailable, log shows `stale bond (AuthenticationFailed)`**
+
+The pairing was refused. The integration clears the bond on the adapter it used
+and tries again, then waits progressively longer between attempts (60 s doubling
+to 15 minutes).
+
+- **Update to v1.1.3 or later.** Earlier versions did not register a Bluetooth
+  pairing agent, without which the host refuses to pair at all. That was the usual
+  cause of this message.
+- **Put the controller into Bluetooth pairing mode** from its panel, if it has
+  one, then reload the integration so it tries immediately.
+- **Close the Go Power Connect app.** A phone holding the link keeps the
+  controller busy, and the controller stops advertising while it is connected.
+
+**Connected, but no readings**
+
+If the log shows the connection and `Polling started` but never `First data`, the
+controller is accepting the link and not answering. Disconnect the controller from
+power (solar first, then battery) and reconnect it. A reboot from its panel may
+not reset its Bluetooth module.
+
+**More than one Bluetooth adapter on the host**
+
+Bonds belong to the adapter that created them, and Home Assistant picks the
+adapter for each connection by signal strength. When a connection lands on the
+adapter without the bond, the integration logs `link is on adapter … but the bond
+is on …` and reconnects through the bonded one. This is normal and takes a second
+or two.
+
+**Useful settings**
+
+- Set the host adapter's scanning mode to **Active** (Settings → Devices &
+  Services → Bluetooth → Configure). The default "auto" mode resolves to passive
+  scanning on Linux, which makes the host slower to see the controller again after
+  a bond is cleared.
 
 ## License
 
