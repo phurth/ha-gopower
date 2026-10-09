@@ -93,6 +93,9 @@ RESET_HISTORY_COMMAND = b"&LDD0200"  # clears the controller's Ah counters;
 # ---------------------------------------------------------------------------
 POLL_INTERVAL = 4.0           # Status poll every 4 seconds
 UNLOCK_DELAY = 0.2            # Wait after unlock before command
+# Links that drop before pairing, with a bond held locally, before that bond is
+# treated as one the controller no longer accepts.
+EARLY_DROP_BOND_CLEAR_THRESHOLD = 3
 OPERATION_DELAY = 0.1         # Delay between BLE operations
 SERVICE_DISCOVERY_DELAY = 0.2
 RECONNECT_BACKOFF_BASE = 5.0

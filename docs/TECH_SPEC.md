@@ -48,6 +48,25 @@
 - reconnect tasks detach themselves from the pending-reconnect slot once they stop
   waiting and begin connecting, so a disconnect arriving mid-connect cannot cancel
   the handler that records bond state
+- Home Assistant chooses the connection path itself (best signal with a free
+  slot) and does not honour the adapter an integration asks for, so after every
+  GP-SC connect the coordinator reads from BlueZ which local adapter actually
+  carries the link and which adapters hold a bond:
+  - no local adapter carries it (the link is on a proxy): the link is dropped and
+    retried; a proxy link reports pairing as complete but never delivers data
+  - the link is on an adapter other than the bonded one: pairing is not attempted;
+    that adapter's unbonded device entry is removed and the connect is retried at
+    once, which leaves the bonded adapter as the only local path
+  - `bonded_source` records the adapter really in use
+- a rejected pairing clears the bond only on the adapter that carried the link
+- a link that drops before pairing three times running, while a bond is held
+  locally, is treated as a bond the controller no longer accepts and is cleared
+- BlueZ only bonds while a pairing agent is registered; without one the adapter
+  is not pairable and `pair()` fails with `AuthenticationFailed` immediately. A
+  NoInputNoOutput agent is therefore held for the duration of `pair()` whenever
+  the adapter in use has no bond
+- if every notification of a frame arrives two or three times (seen after a link
+  drop and reconnect), the copies are collapsed before parsing
 - energy totals are held at a high-water mark that is released only when the raw
   Ah counter drops, so voltage-driven wobble in the derived Wh value is not
   mistaken for a counter reset by `total_increasing` statistics
@@ -175,7 +194,7 @@ Timing constants:
 ## 10. Security and Safety Notes
 
 - local BLE control path only
-- GP-PWM-30-UL pairing uses LE Legacy Just Works (NoInputNoOutput); BlueZ manages the bond
+- GP-PWM-30-UL pairing uses LE Legacy Just Works (NoInputNoOutput); BlueZ manages the bond, and the integration registers a pairing agent only while pairing
 - limited control scope reduces accidental high-impact writes
 - strict parser validation helps prevent malformed-state updates
 

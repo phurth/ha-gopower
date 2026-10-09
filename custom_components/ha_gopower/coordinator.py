@@ -29,6 +29,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .pairing_agent import just_works_agent
 from .const import (
     ADVERTISEMENT_WAIT,
     BOND_RETRY_COOLDOWN,
@@ -70,6 +71,7 @@ from .const import (
     SERVICE_DISCOVERY_DELAY,
     SERVICE_UUID,
     STALE_TIMEOUT,
+    EARLY_DROP_BOND_CLEAR_THRESHOLD,
     UNLOCK_COMMAND,
     UNLOCK_DELAY,
     WATCHDOG_INTERVAL,
@@ -77,6 +79,59 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _dbus_value(value: Any) -> Any:
+    """Return the payload of a D-Bus Variant (or the value itself)."""
+    return value.value if hasattr(value, "value") else value
+
+
+def _collapse_repeated_chunks(chunks: list[str]) -> tuple[list[str], int]:
+    """Undo N-fold delivery of the notifications that make up one frame.
+
+    After a link drops and reconnects, BlueZ can end up delivering every
+    notification two or three times.  The frame then arrives as
+    ``c1 c1 c2 c2 … cn`` — the frame ends on the *first* copy of its last
+    chunk, so that one appears once.  Returns the de-duplicated chunks and the
+    delivery multiple (1 when the frame is not repeated).
+    """
+    body, last = chunks[:-1], chunks[-1]
+    for copies in (3, 2):
+        if len(body) < copies * 2 or len(body) % copies:
+            continue
+        groups = [body[i : i + copies] for i in range(0, len(body), copies)]
+        if all(len(set(group)) == 1 for group in groups):
+            return [group[0] for group in groups] + [last], copies
+    return chunks, 1
+
+
+def _bluez_link_state(objects: dict, address: str) -> tuple[str | None, set[str]]:
+    """Read where *address* is connected and bonded from a BlueZ object tree.
+
+    Returns ``(link_adapter, bonded_adapters)`` as adapter MACs: the local
+    adapter currently carrying a link to the device (None if no local adapter
+    is — the link, if any, is on a proxy), and every local adapter holding a
+    bond for it.  BlueZ keeps a separate device object, and bond, per adapter.
+    """
+    target = address.upper()
+    link_adapter: str | None = None
+    bonded: set[str] = set()
+    for path, interfaces in objects.items():
+        device = interfaces.get("org.bluez.Device1")
+        if device is None:
+            continue
+        if str(_dbus_value(device.get("Address"))).upper() != target:
+            continue
+        adapter = objects.get(str(path).rsplit("/", 1)[0], {}).get("org.bluez.Adapter1")
+        adapter_mac = _dbus_value(adapter.get("Address")) if adapter else None
+        if adapter_mac is None:
+            continue
+        adapter_mac = str(adapter_mac).upper()
+        if _dbus_value(device.get("Connected")):
+            link_adapter = adapter_mac
+        if _dbus_value(device.get("Paired")):
+            bonded.add(adapter_mac)
+    return link_adapter, bonded
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +199,14 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
 
         # Consecutive stale-bond clears, used to escalate the cooldown.
         self._bond_failures: int = 0
+        # Notifications of the SC frame being assembled, kept separately so
+        # N-fold delivery can be recognised and undone at frame end.
+        self._frame_chunks: list[str] = []
+        self._repeat_tail: str = ""
+        self._repeat_tail_left: int = 0
+        self._repeat_warned: bool = False
+        # Consecutive links that dropped before pairing while BlueZ held a bond.
+        self._early_drops: int = 0
         # One retry straight after a confirmed bond clear, per normal attempt:
         # _immediate_retry_pending is set when such a retry is queued, and
         # _next/_attempt_is_immediate track whether the attempt now running is
@@ -273,8 +336,46 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 )
         return macs
 
-    async def _async_remove_bluez_bond(self) -> bool:
+    async def _async_bluez_link_state(self) -> tuple[str | None, set[str]] | None:
+        """Ask BlueZ which local adapter carries the link and which hold a bond.
+
+        Home Assistant chooses the connection path itself, by signal strength,
+        and ignores the adapter this integration asked for — so the only way
+        to know where a link actually landed is to look.  Returns None when
+        BlueZ cannot be queried, in which case nothing can be verified.
+        """
+        try:
+            from dbus_fast import BusType, Message, MessageType  # noqa: PLC0415
+            from dbus_fast.aio import MessageBus  # noqa: PLC0415
+
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            try:
+                reply = await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/",
+                        interface="org.freedesktop.DBus.ObjectManager",
+                        member="GetManagedObjects",
+                    )
+                )
+            finally:
+                bus.disconnect()
+            if reply.message_type == MessageType.ERROR or not reply.body:
+                return None
+            return _bluez_link_state(reply.body[0], self._address)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "Could not read BlueZ link state for %s (%s: %s)",
+                self._address, type(exc).__name__, exc,
+            )
+            return None
+
+    async def _async_remove_bluez_bond(self, only_adapter: str | None = None) -> bool:
         """Remove the BlueZ device object (and its bond) for this address.
+
+        With *only_adapter* (an adapter MAC) just that adapter's object is
+        removed.  A bond held by a different adapter is a different bond and
+        may be perfectly good.
 
         Talks to BlueZ over D-Bus rather than shelling out to bluetoothctl:
         that binary is not guaranteed to exist inside the Home Assistant
@@ -316,6 +417,13 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                     if addr is None or str(addr).upper() != target:
                         continue
                     adapter_path = path.rsplit("/", 1)[0]
+                    if only_adapter is not None:
+                        adapter = reply.body[0].get(adapter_path, {}).get(
+                            "org.bluez.Adapter1", {}
+                        )
+                        adapter_mac = _dbus_value(adapter.get("Address"))
+                        if str(adapter_mac).upper() != only_adapter.upper():
+                            continue
                     rm = await bus.call(
                         Message(
                             destination="org.bluez",
@@ -572,7 +680,77 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         self._client = client
         self._connected = True
         self._response_buffer = ""
+        self._frame_chunks = []
+        self._repeat_tail_left = 0
+        self._repeat_warned = False
         _LOGGER.info("Connected to GoPower %s", self._address)
+
+        # Adapter that really carries this link (None = could not be verified).
+        link_adapter: str | None = None
+        bonded_adapters: set[str] = set()
+        if self._is_sc:
+            link = await self._async_bluez_link_state()
+            if link is not None:
+                link_adapter, bonded_adapters = link
+                if link_adapter is None and not getattr(client, "is_connected", False):
+                    # The link is already gone.  With a bond on our side this
+                    # is what a controller that has lost *its* half of the bond
+                    # looks like (reset, or put back into pairing mode): BlueZ
+                    # encrypts with the old key on connect and the controller
+                    # hangs up before pair() is ever reached, so the
+                    # AuthenticationFailed handling never sees it.  A weak link
+                    # drops the same way, hence a few in a row before acting.
+                    self._current_connect_source = None
+                    if bonded_adapters:
+                        self._early_drops += 1
+                        if self._early_drops >= EARLY_DROP_BOND_CLEAR_THRESHOLD:
+                            self._early_drops = 0
+                            _LOGGER.warning(
+                                "GoPower %s: link dropped before pairing %d times "
+                                "running with a bond on %s — the controller no "
+                                "longer accepts that bond; clearing it for a "
+                                "fresh pair",
+                                self._address,
+                                EARLY_DROP_BOND_CLEAR_THRESHOLD,
+                                sorted(bonded_adapters),
+                            )
+                            await self._async_remove_bluez_bond()
+                    await self._async_abandon_link(client)
+                    return
+                if link_adapter is None:
+                    # Home Assistant routed the connect through a proxy — it
+                    # does so whenever no local adapter has the device cached,
+                    # which is exactly the moment after a bond clear.  pair()
+                    # "succeeds" on a proxy but the link is never encrypted by
+                    # BlueZ, so the controller sends nothing.  Refuse it; while
+                    # the proxy holds the link the controller stops advertising
+                    # and no local adapter can take over.
+                    _LOGGER.warning(
+                        "GoPower %s: connected through a Bluetooth proxy, not a "
+                        "local adapter — dropping the link (GP-SC pairing needs "
+                        "a local adapter) and retrying",
+                        self._address,
+                    )
+                    self._current_connect_source = None
+                    await self._async_abandon_link(client)
+                    return
+                self._current_connect_source = link_adapter
+                if bonded_adapters and link_adapter not in bonded_adapters:
+                    # The bond lives on another adapter.  Pairing from this one
+                    # is rejected, and treating that as a stale bond used to
+                    # wipe the good bond as well.  Drop this adapter's (unbonded)
+                    # device object instead, so the retry is routed to the
+                    # adapter that holds the bond.
+                    _LOGGER.info(
+                        "GoPower %s: link is on adapter %s but the bond is on %s "
+                        "— reconnecting through the bonded adapter",
+                        self._address, link_adapter, sorted(bonded_adapters),
+                    )
+                    if not self._attempt_is_immediate:
+                        self._immediate_retry_pending = True
+                    await self._async_remove_bluez_bond(only_adapter=link_adapter)
+                    await self._async_abandon_link(client)
+                    return
 
         # GP-SC: the 569a notify characteristic requires an encrypted link.
         # Explicitly call pair() to trigger LE Legacy Just Works SMP bonding
@@ -580,8 +758,17 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Works automatically (NoInputNoOutput) — no PIN agent needed.
         if self._is_sc:
             try:
-                await client.pair()
+                if link_adapter is not None and link_adapter in bonded_adapters:
+                    # Already bonded on this adapter: pair() only confirms it.
+                    await client.pair()
+                else:
+                    # BlueZ refuses to bond — instantly, with
+                    # AuthenticationFailed — unless a pairing agent is
+                    # registered.  Nothing else guarantees one is.
+                    async with just_works_agent():
+                        await client.pair()
                 self._bond_failures = 0
+                self._early_drops = 0
                 _LOGGER.info("BLE Just Works pairing completed for %s", self._address)
             except Exception as exc:  # noqa: BLE001
                 exc_str = str(exc)
@@ -612,7 +799,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         BOND_RETRY_COOLDOWN_CAP,
                     )
                     self._bond_cooldown_until = time.monotonic() + cooldown
-                    removed = await self._async_remove_bluez_bond()
+                    # Only the adapter this link used — a bond on another
+                    # adapter was not the one that just failed.
+                    removed = await self._async_remove_bluez_bond(
+                        only_adapter=link_adapter
+                    )
 
                     # The only pair this controller has ever accepted came
                     # immediately after a completed RemoveDevice, with no gap;
@@ -767,6 +958,21 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         self._start_polling()
         self._start_watchdog()
         self.async_update_listeners()
+
+    async def _async_abandon_link(self, client: BleakClient) -> None:
+        """Drop a link this attempt will not use and make sure a retry is queued.
+
+        The disconnect callback normally queues the retry, but it does not run
+        for a link that is already gone, and disconnect() itself can time out.
+        """
+        try:
+            await client.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Disconnect of abandoned link failed: %s", exc)
+        self._client = None
+        self._connected = False
+        if self._reconnect_task is None:
+            self._schedule_reconnect()
 
     async def async_disconnect(self) -> None:
         """Disconnect from the controller."""
@@ -982,12 +1188,33 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             _LOGGER.debug("Failed to decode notification chunk")
             return
 
+        if self._is_sc:
+            # Remaining copies of the previous frame's final chunk.
+            if self._repeat_tail_left and chunk == self._repeat_tail:
+                self._repeat_tail_left -= 1
+                return
+            self._repeat_tail_left = 0
+            self._frame_chunks.append(chunk)
+
         self._response_buffer += chunk
 
         if self._is_sc:
             # SC response is ASCII terminated by \r\n.  Treat any newline as
             # end-of-frame in case the \r is stripped by the BLE stack.
             if "\r\n" in self._response_buffer or "\n" in self._response_buffer:
+                chunks, copies = _collapse_repeated_chunks(self._frame_chunks)
+                self._frame_chunks = []
+                if copies > 1:
+                    self._response_buffer = "".join(chunks)
+                    self._repeat_tail = chunks[-1]
+                    self._repeat_tail_left = copies - 1
+                    if not self._repeat_warned:
+                        self._repeat_warned = True
+                        _LOGGER.warning(
+                            "GoPower %s: every notification is arriving %d times "
+                            "on this connection — de-duplicating",
+                            self._address, copies,
+                        )
                 raw = self._response_buffer.rstrip("\r\n")
                 self._response_buffer = ""
                 self._last_data_time = time.monotonic()
