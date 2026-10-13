@@ -51,6 +51,10 @@ def _feed(chunks: list[str]) -> list[str]:
     c._repeat_tail_left = 0
     c._repeat_warned = False
     c._last_data_time = 0.0
+    c._silent_links = 0
+    c._silent_hold_until = 0.0
+    c._poll_sent_at = None
+    c._data_this_link = False
     c._parse_and_update = frames.append
     c.hass = SimpleNamespace(async_create_task=lambda _result: None)
     for chunk in chunks:

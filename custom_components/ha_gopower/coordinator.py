@@ -56,6 +56,7 @@ from .const import (
     OPERATION_DELAY,
     POLL_COMMAND,
     POLL_INTERVAL,
+    POLL_REPLY_TIMEOUT,
     RECONNECT_BACKOFF_BASE,
     RECONNECT_BACKOFF_CAP,
     SC_EXPECTED_FIELD_COUNT,
@@ -70,6 +71,9 @@ from .const import (
     SC_WRITE_CHAR_UUID,
     SERVICE_DISCOVERY_DELAY,
     SERVICE_UUID,
+    SILENT_HOLD_BASE,
+    SILENT_HOLD_CAP,
+    SILENT_LINK_TIMEOUT,
     STALE_TIMEOUT,
     EARLY_DROP_BOND_CLEAR_THRESHOLD,
     UNLOCK_COMMAND,
@@ -196,6 +200,15 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Set after clearing a stale BlueZ bond so the controller gets an
         # uninterrupted idle window to drop its own bond entry.
         self._bond_cooldown_until: float = 0.0
+        # ── Silent-controller tracking ───────────────────────────────
+        # When this link became usable, and whether it has produced data yet.
+        self._link_started: float = 0.0
+        self._data_this_link: bool = False
+        # Consecutive links that ended without the controller answering.
+        self._silent_links: int = 0
+        self._silent_hold_until: float = 0.0
+        # When the poll still awaiting a reply was sent (None = none pending).
+        self._poll_sent_at: float | None = None
 
         # Consecutive stale-bond clears, used to escalate the cooldown.
         self._bond_failures: int = 0
@@ -617,6 +630,67 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     # Connect / disconnect
     # ------------------------------------------------------------------
 
+    def _hold_remaining(self) -> tuple[float, str]:
+        """Seconds until a connect is allowed, and why it is being held."""
+        now = time.monotonic()
+        bond = self._bond_cooldown_until - now
+        silent = self._silent_hold_until - now
+        if silent > bond:
+            return silent, "silent-controller hold"
+        return bond, "stale-bond cooldown"
+
+    def _note_data_received(self) -> None:
+        """Record that the controller answered on this link."""
+        self._last_data_time = time.monotonic()
+        self._poll_sent_at = None
+        self._data_this_link = True
+        if self._silent_links:
+            _LOGGER.info(
+                "GoPower %s is answering again after %d silent link(s)",
+                self._address, self._silent_links,
+            )
+        self._silent_links = 0
+        self._silent_hold_until = 0.0
+
+    def _check_link_health(self) -> bool:
+        """Return True if the link should be dropped because it has gone quiet.
+
+        A link that never produced data is given SILENT_LINK_TIMEOUT; one that
+        was working and stopped is given STALE_TIMEOUT.  The first quiet link
+        is simply reconnected, which is enough if the link itself was at
+        fault.  A second in a row means the controller is connected but not
+        answering, and it is then left alone for a growing interval instead of
+        being reconnected over and over.
+        """
+        now = time.monotonic()
+        if self._data_this_link:
+            quiet_for, limit = now - self._last_data_time, STALE_TIMEOUT
+        else:
+            quiet_for, limit = now - self._link_started, SILENT_LINK_TIMEOUT
+        if quiet_for <= limit:
+            return False
+
+        self._silent_links += 1
+        if self._silent_links == 1:
+            _LOGGER.warning(
+                "No data from GoPower %s for %.0fs — reconnecting once in case "
+                "the link is at fault",
+                self._address, quiet_for,
+            )
+            return True
+
+        hold = min(
+            SILENT_HOLD_BASE * (2 ** (self._silent_links - 2)), SILENT_HOLD_CAP
+        )
+        self._silent_hold_until = now + hold
+        _LOGGER.warning(
+            "GoPower %s is connected but not answering (%d links in a row). "
+            "Leaving it alone for %.0f min before trying again. Reconnecting "
+            "does not clear this; disconnecting the controller from power has",
+            self._address, self._silent_links, hold / 60,
+        )
+        return True
+
     async def async_connect(self) -> None:
         """Establish BLE connection, discover services, start polling."""
         async with self._connect_lock:
@@ -627,11 +701,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             # pre-connect check microseconds before the cooldown was recorded
             # would otherwise connect straight through the idle window the
             # controller needs to drop its bond — restarting the thrash.
-            remaining = self._bond_cooldown_until - time.monotonic()
+            remaining, reason = self._hold_remaining()
             if remaining > 0:
                 _LOGGER.info(
-                    "Skipping connect to %s: %.0fs of stale-bond cooldown remain",
-                    self._address, remaining,
+                    "Skipping connect to %s: %.0fs of %s remain",
+                    self._address, remaining, reason,
                 )
                 if self._reconnect_task is None:
                     self._schedule_reconnect()
@@ -1030,11 +1104,12 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         )
         # Never retry before a pending stale-bond cooldown expires — the
         # controller needs that idle window to drop its own bond entry.
-        cooldown_remaining = self._bond_cooldown_until - time.monotonic()
+        cooldown_remaining, reason = self._hold_remaining()
         if cooldown_remaining > delay:
             _LOGGER.info(
-                "Holding reconnect for %.0fs (stale-bond cooldown) instead of %.0fs",
+                "Holding reconnect for %.0fs (%s) instead of %.0fs",
                 cooldown_remaining,
+                reason,
                 delay,
             )
             delay = cooldown_remaining
@@ -1052,10 +1127,10 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # device drops the link the instant pairing fails, so _on_disconnect
         # can reach _schedule_reconnect before the pairing error handler runs.
         # Re-check the deadline here so the hold applies regardless of ordering.
-        remaining = self._bond_cooldown_until - time.monotonic()
+        remaining, reason = self._hold_remaining()
         if remaining > 0:
             _LOGGER.info(
-                "Deferring reconnect a further %.0fs (stale-bond cooldown)", remaining
+                "Deferring reconnect a further %.0fs (%s)", remaining, reason
             )
             await asyncio.sleep(remaining)
         # Past this point the task is no longer a *pending* reconnect — it is the
@@ -1098,6 +1173,9 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
     def _start_polling(self) -> None:
         """Start the 4-second polling loop."""
         self._stop_polling()
+        self._link_started = time.monotonic()
+        self._data_this_link = False
+        self._poll_sent_at = None
         self._poll_task = self._entry.async_create_background_task(
             self.hass, self._poll_loop(), "gopower_poll_loop"
         )
@@ -1123,11 +1201,18 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             _LOGGER.exception("Poll loop error")
 
     async def _poll_once(self) -> None:
-        """Send a single poll command."""
+        """Send a single poll command, unless the last one is still unanswered."""
         if not self._client or not self._connected:
+            return
+        now = time.monotonic()
+        if (
+            self._poll_sent_at is not None
+            and now - self._poll_sent_at < POLL_REPLY_TIMEOUT
+        ):
             return
         try:
             write_uuid = SC_WRITE_CHAR_UUID if self._is_sc else WRITE_CHAR_UUID
+            self._poll_sent_at = now
             await self._client.write_gatt_char(write_uuid, POLL_COMMAND)
         except (BleakError, TimeoutError, OSError) as exc:
             _LOGGER.warning("Poll write failed: %s", exc)
@@ -1153,24 +1238,26 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         """Check connection health every WATCHDOG_INTERVAL."""
         try:
             while self._connected:
-                await asyncio.sleep(WATCHDOG_INTERVAL)
+                # A new link is checked sooner: a healthy controller answers
+                # its first poll at once.
+                await asyncio.sleep(
+                    WATCHDOG_INTERVAL
+                    if self._data_this_link
+                    else min(WATCHDOG_INTERVAL, SILENT_LINK_TIMEOUT + 1.0)
+                )
                 if not self._connected:
                     break
 
-                # Stale data detection
-                if self._last_data_time > 0:
-                    age = time.monotonic() - self._last_data_time
-                    if age > STALE_TIMEOUT:
-                        _LOGGER.warning(
-                            "No data for %.0fs — connection stale, forcing reconnect",
-                            age,
-                        )
-                        if self._client:
-                            try:
-                                await self._client.disconnect()
-                            except Exception:  # noqa: BLE001
-                                pass
-                        break
+                if self._check_link_health():
+                    # Stop polling first, so a poll is not caught mid-write by
+                    # the disconnect.
+                    self._stop_polling()
+                    if self._client:
+                        try:
+                            await self._client.disconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    break
         except asyncio.CancelledError:
             pass
 
@@ -1217,7 +1304,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                         )
                 raw = self._response_buffer.rstrip("\r\n")
                 self._response_buffer = ""
-                self._last_data_time = time.monotonic()
+                self._note_data_received()
                 self.hass.async_create_task(self._parse_and_update(raw))
             else:
                 semicolons = self._response_buffer.count(FIELD_DELIMITER)
@@ -1232,7 +1319,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 # Complete response
                 raw = self._response_buffer
                 self._response_buffer = ""
-                self._last_data_time = time.monotonic()
+                self._note_data_received()
                 self.hass.async_create_task(self._parse_and_update(raw))
             else:
                 _LOGGER.debug(

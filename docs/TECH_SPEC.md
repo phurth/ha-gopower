@@ -192,7 +192,9 @@ Timing constants:
 - operation delay: `0.1s`
 - service discovery delay: `0.2s`
 - watchdog interval: `60s`
-- stale timeout: `300s`
+- stale timeout: `300s` for a link that was delivering data; `45s` for a new link that has delivered none
+- a poll is not repeated until the previous one is answered or `12s` have passed
+- silent-controller hold: after two silent links in a row, `15 min` doubling to a `60 min` cap between attempts; cleared by the first data received
 
 ## 10. Security and Safety Notes
 
@@ -204,7 +206,7 @@ Timing constants:
 ## 11. Known Constraints
 
 - GP-PWM-30-UL requires local HCI adapter on the HA host; pairing cannot be performed via an ESPHome BLE proxy
-- a controller that is connected and acknowledges writes but returns no data needs a full power cycle; the stale-data watchdog does not yet back off against one, and does not fire for a link that has never produced data
+- a controller can stay connected and acknowledge writes while returning no data; this has only been cleared by a full power cycle of the controller
 - protocol is telemetry-centric; control operations are intentionally narrow
 - GP-PWM-30-UL panel-side voltage and energy-today figures are not transmitted by the device
 

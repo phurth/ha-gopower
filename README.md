@@ -133,9 +133,15 @@ to 15 minutes).
 **Connected, but no readings**
 
 If the log shows the connection and `Polling started` but never `First data`, the
-controller is accepting the link and not answering. Disconnect the controller from
-power (solar first, then battery) and reconnect it. A reboot from its panel may
-not reset its Bluetooth module.
+controller is accepting the link and not answering. The integration notices this
+within a minute, reconnects once in case the link was at fault, and if the
+controller is still silent logs `connected but not answering` and leaves it alone:
+15 minutes at first, then 30, then an hour between attempts. Reloading the
+integration makes it try again immediately.
+
+Reconnecting does not clear this state. What has cleared it is disconnecting the
+controller from power (solar first, then battery) and reconnecting it. A reboot
+from its panel may not reset its Bluetooth module.
 
 **More than one Bluetooth adapter on the host**
 

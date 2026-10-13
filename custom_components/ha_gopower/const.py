@@ -115,3 +115,17 @@ LOCAL_HCI_CACHE_TTL = 60.0    # Cache lifetime for a *successful* adapter enumer
 ADVERTISEMENT_WAIT = 30.0     # Wait for the address to re-enter a scanner's live cache
 STALE_TIMEOUT = 300.0         # 5 min without data → stale
 WATCHDOG_INTERVAL = 60.0      # Connection health-check every 60s
+
+# A poll is not repeated until the previous one is answered or this long has
+# passed.  Polling on a fixed timer regardless of replies kept writing into a
+# controller that had stopped answering.
+POLL_REPLY_TIMEOUT = 12.0
+# A healthy controller answers the first poll in under a second.  A new link
+# that has produced nothing after this long is treated as silent.
+SILENT_LINK_TIMEOUT = 45.0
+# How long to leave a controller alone once it has been silent on two links in
+# a row: doubling from the base to the cap.  A controller in this state has
+# only ever been recovered by disconnecting it from power, so reconnecting
+# quickly achieves nothing except load on the host's Bluetooth adapter.
+SILENT_HOLD_BASE = 900.0
+SILENT_HOLD_CAP = 3600.0
