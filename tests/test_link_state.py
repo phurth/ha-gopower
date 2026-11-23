@@ -103,6 +103,14 @@ def _run_connect(monkeypatch, link_state, client, attempt_is_immediate=False):
     c._bond_cooldown_until = 0.0
     c._client = None
     c._connected = False
+    c.bonded_adapters = {}
+    c.link_adapter = None
+    c.pinned_adapters = frozenset()
+
+    async def no_pin():
+        return frozenset()
+
+    c._async_sc_pin = no_pin
 
     async def pick():
         return object(), HCI1

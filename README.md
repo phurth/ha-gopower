@@ -30,6 +30,7 @@ Two hardware variants use different BLE protocols and expose different data:
 | Model Number | ✓ | ✓ | Diagnostic |
 | Firmware Version | ✓ | ✓ | Diagnostic |
 | Serial Number | ✓ | — | Diagnostic; not transmitted by GP-PWM-30-UL. |
+| Bonded Adapter | — | ✓ | Diagnostic; the host Bluetooth adapter holding the pairing, its `hciN` name and the adapter the link uses. |
 | Reboot Controller | ✓ | ✓ | Button |
 
 ### Note on Charge Power vs Solar Power
@@ -106,15 +107,20 @@ They remain visible in the integration's diagnostics output for protocol debuggi
 
 The 569a variant bonds at the radio level, which an ESPHome Bluetooth proxy cannot
 relay — it must connect through a Bluetooth adapter attached to the Home Assistant
-host itself. The integration checks this after every connect and drops a link that
-landed on a proxy.
+host itself. Since v1.1.5 the integration only lets Home Assistant connect through
+the adapter holding the bond (or, before the first pairing, through one of the
+host's own adapters), even when a proxy or another adapter has a stronger signal.
+It still checks after every connect and drops a link that landed elsewhere.
 
-**Entities unavailable, log shows `connected through a Bluetooth proxy`**
+**Entities unavailable, log shows `has not heard the device recently` or
+`connected through a Bluetooth proxy`**
 
-Home Assistant chose a proxy because no adapter on the host could reach the
-controller at that moment. The integration retries on its own. If the message
-keeps repeating, the controller is out of range of the host's adapter, or that
-adapter is not accepting connections.
+The adapter holding the bond (or, before pairing, every adapter on the host)
+could not reach the controller at that moment, and the integration will not
+use a proxy instead. It retries on its own. If the message keeps repeating, the
+controller is out of range of that adapter, or the adapter is not accepting
+connections. The **Bonded Adapter** diagnostic sensor shows which adapter
+holds the bond.
 
 **Entities unavailable, log shows `stale bond (AuthenticationFailed)`**
 
@@ -145,11 +151,13 @@ from its panel may not reset its Bluetooth module.
 
 **More than one Bluetooth adapter on the host**
 
-Bonds belong to the adapter that created them, and Home Assistant picks the
-adapter for each connection by signal strength. When a connection lands on the
-adapter without the bond, the integration logs `link is on adapter … but the bond
-is on …` and reconnects through the bonded one. This is normal and takes a second
-or two.
+Bonds belong to the adapter that created them, and Home Assistant would normally
+pick the adapter for each connection by signal strength. The integration restricts
+that choice to the adapter holding the bond, shown by the **Bonded Adapter**
+diagnostic sensor (its *connected through* attribute shows the adapter the link
+actually uses). Should a connection still land on the adapter without the bond,
+the integration logs `link is on adapter … but the bond is on …` and reconnects
+through the bonded one.
 
 **Useful settings**
 

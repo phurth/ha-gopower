@@ -35,6 +35,7 @@ class _DUC(metaclass=_DUCMeta):
 
 
 _stub("bleak", BleakClient=object, BleakError=Exception, BleakGATTCharacteristic=object)
+_stub("bleak.exc", BleakError=Exception)
 _stub("bleak_retry_connector", establish_connection=None,
       BleakClientWithServiceCache=object)
 ha = _stub("homeassistant")

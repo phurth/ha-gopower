@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -143,10 +144,13 @@ async def async_setup_entry(
     coordinator: GoPowerCoordinator = hass.data[DOMAIN][entry.entry_id]
     address = entry.data[CONF_ADDRESS]
 
-    async_add_entities(
-        GoPowerSensor(coordinator, address, desc)
-        for desc in SENSOR_DESCRIPTIONS
-    )
+    entities: list[SensorEntity] = [
+        GoPowerSensor(coordinator, address, desc) for desc in SENSOR_DESCRIPTIONS
+    ]
+    # Only the GP-SC variant pairs; the FFF0 variant has no bond to show.
+    if coordinator.pairs:
+        entities.append(GoPowerBondedAdapterSensor(coordinator, address))
+    async_add_entities(entities)
 
 
 class GoPowerSensor(
@@ -189,3 +193,50 @@ class GoPowerSensor(
         if self.coordinator.state is None:
             return None
         return self.entity_description.value_fn(self.coordinator.state)
+
+
+class GoPowerBondedAdapterSensor(CoordinatorEntity[GoPowerCoordinator], SensorEntity):
+    """Local Bluetooth adapter holding the controller's bond (GP-SC only).
+
+    BlueZ keeps a bond per adapter and only that adapter can talk to the
+    controller, so connections are pinned to it (see ble_pinning.py).  The
+    state is the adapter's MAC address; the hciN name can change between
+    boots, so it is an attribute.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Bonded Adapter"
+    _attr_icon = "mdi:bluetooth-connect"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: GoPowerCoordinator, address: str) -> None:
+        super().__init__(coordinator)
+        mac = address.replace(":", "").lower()
+        self._attr_unique_id = f"{mac}_bonded_adapter"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, address)},
+            name=f"GoPower {address}",
+            manufacturer="Go Power!",
+            model=coordinator.model_name,
+            connections={("bluetooth", address)},
+        )
+
+    @property
+    def available(self) -> bool:
+        """Bond state comes from BlueZ, not the link, so it stays available."""
+        return True
+
+    @property
+    def native_value(self) -> str | None:
+        adapters = self.coordinator.bonded_adapters
+        return ", ".join(adapters) if adapters else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        coordinator = self.coordinator
+        return {
+            "adapters": dict(coordinator.bonded_adapters),
+            "pinned": bool(coordinator.bonded_adapters)
+            and coordinator.pinned_adapters == frozenset(coordinator.bonded_adapters),
+            "connected_through": coordinator.link_adapter,
+        }

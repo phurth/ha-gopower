@@ -29,6 +29,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .ble_pinning import pinned_client_class
 from .pairing_agent import just_works_agent
 from .const import (
     ADVERTISEMENT_WAIT,
@@ -109,6 +110,24 @@ def _collapse_repeated_chunks(chunks: list[str]) -> tuple[list[str], int]:
     return chunks, 1
 
 
+def _bonded_adapter_names(objects: dict, address: str) -> dict[str, str]:
+    """Map each local adapter MAC holding a bond for *address* to its hciN name."""
+    target = address.upper()
+    bonded: dict[str, str] = {}
+    for path, interfaces in objects.items():
+        device = interfaces.get("org.bluez.Device1")
+        if device is None or not _dbus_value(device.get("Paired")):
+            continue
+        if str(_dbus_value(device.get("Address"))).upper() != target:
+            continue
+        adapter_path = str(path).rsplit("/", 1)[0]
+        adapter = objects.get(adapter_path, {}).get("org.bluez.Adapter1")
+        adapter_mac = _dbus_value(adapter.get("Address")) if adapter else None
+        if adapter_mac is not None:
+            bonded[str(adapter_mac).upper()] = adapter_path.rsplit("/", 1)[-1]
+    return dict(sorted(bonded.items()))
+
+
 def _bluez_link_state(objects: dict, address: str) -> tuple[str | None, set[str]]:
     """Read where *address* is connected and bonded from a BlueZ object tree.
 
@@ -182,6 +201,16 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # BLE client
         self._client: BleakClient | None = None
         self._connected = False
+
+        # ── Bonded-adapter pinning (GP-SC) ───────────────────────────
+        # {adapter MAC: "hciN"} for each local adapter holding a BlueZ bond
+        # with the controller, as of the last connect attempt.
+        self.bonded_adapters: dict[str, str] = {}
+        # Local adapter actually carrying the current link (None = none, or a
+        # proxy).  Read from BlueZ after connecting.
+        self.link_adapter: str | None = None
+        # Adapters the last connect was restricted to (see ble_pinning.py).
+        self.pinned_adapters: frozenset[str] = frozenset()
 
         # Response assembly
         self._response_buffer = ""
@@ -275,6 +304,11 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         """Return a human-readable model name for DeviceInfo."""
         return "GP-PWM-30-UL" if self._is_sc else "GP-PWM-30-SB"
 
+    @property
+    def pairs(self) -> bool:
+        """True for the GP-SC variant, which needs a BLE bond (Just Works)."""
+        return self._is_sc
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -349,14 +383,8 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 )
         return macs
 
-    async def _async_bluez_link_state(self) -> tuple[str | None, set[str]] | None:
-        """Ask BlueZ which local adapter carries the link and which hold a bond.
-
-        Home Assistant chooses the connection path itself, by signal strength,
-        and ignores the adapter this integration asked for — so the only way
-        to know where a link actually landed is to look.  Returns None when
-        BlueZ cannot be queried, in which case nothing can be verified.
-        """
+    async def _async_bluez_objects(self) -> dict | None:
+        """Return BlueZ's object tree, or None when it cannot be queried."""
         try:
             from dbus_fast import BusType, Message, MessageType  # noqa: PLC0415
             from dbus_fast.aio import MessageBus  # noqa: PLC0415
@@ -375,13 +403,48 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
                 bus.disconnect()
             if reply.message_type == MessageType.ERROR or not reply.body:
                 return None
-            return _bluez_link_state(reply.body[0], self._address)
+            return reply.body[0]
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug(
-                "Could not read BlueZ link state for %s (%s: %s)",
+                "Could not read BlueZ objects for %s (%s: %s)",
                 self._address, type(exc).__name__, exc,
             )
             return None
+
+    async def _async_bluez_link_state(self) -> tuple[str | None, set[str]] | None:
+        """Ask BlueZ which local adapter carries the link and which hold a bond.
+
+        Home Assistant chooses the connection path itself, by signal strength,
+        and ignores the adapter this integration asked for — so the only way
+        to know where a link actually landed is to look.  Returns None when
+        BlueZ cannot be queried, in which case nothing can be verified.
+        """
+        objects = await self._async_bluez_objects()
+        if objects is None:
+            return None
+        return _bluez_link_state(objects, self._address)
+
+    async def _async_sc_pin(self) -> frozenset[str]:
+        """Return the adapters a GP-SC connection may go through.
+
+        Home Assistant picks the connection path itself and ignores the
+        BLEDevice we pass, so on a host with a second adapter or an ESPHome
+        proxy a connect could land where the controller cannot be paired with
+        (see the v1.1.2 notes).  The pinned client restricts that choice
+        up front: to the adapter(s) holding the bond, or — before a bond
+        exists — to any local adapter, since Just Works pairing cannot be
+        relayed through a proxy.  Empty means "no restriction" (BlueZ could
+        not be queried), and the post-connect checks still apply.
+        """
+        objects = await self._async_bluez_objects()
+        if objects is not None:
+            bonded = _bonded_adapter_names(objects, self._address)
+            if bonded != self.bonded_adapters:
+                self.bonded_adapters = bonded
+                self.async_update_listeners()
+            if bonded:
+                return frozenset(bonded)
+        return frozenset(await self._async_get_local_hci_macs())
 
     async def _async_remove_bluez_bond(self, only_adapter: str | None = None) -> bool:
         """Remove the BlueZ device object (and its bond) for this address.
@@ -739,12 +802,28 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             self._schedule_reconnect()
             return
 
+        # GP-SC: restrict Home Assistant's path choice to the bonded adapter
+        # (or, before a bond exists, to the local adapters) — see _async_sc_pin.
+        pin: frozenset[str] = await self._async_sc_pin() if self._is_sc else frozenset()
+        self.pinned_adapters = pin
+        pinned_cls = pinned_client_class() if pin else None
+        if pinned_cls is not None:
+            _LOGGER.info(
+                "GoPower %s: connecting only through %s (%s)",
+                self._address,
+                ", ".join(sorted(pin)),
+                "the adapter holding the bond"
+                if self.bonded_adapters
+                else "a local adapter; Just Works pairing cannot go through a proxy",
+            )
+
         try:
             client = await establish_connection(
-                BleakClient,
+                pinned_cls or BleakClient,
                 device,
                 self._address,
                 disconnected_callback=self._on_disconnect,
+                **({"pinned_sources": pin} if pinned_cls else {}),
             )
         except (BleakError, TimeoutError, OSError) as exc:
             _LOGGER.warning("BLE connect failed: %s — will retry", exc)
@@ -766,6 +845,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
             link = await self._async_bluez_link_state()
             if link is not None:
                 link_adapter, bonded_adapters = link
+                self.link_adapter = link_adapter
                 if link_adapter is None and not getattr(client, "is_connected", False):
                     # The link is already gone.  With a bond on our side this
                     # is what a controller that has lost *its* half of the bond
@@ -1068,6 +1148,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         _LOGGER.warning("GoPower %s disconnected", self._address)
         self._stop_polling()
         self._stop_watchdog()
+        self.link_adapter = None
         self._connected = False
         self._client = None
         self.async_update_listeners()
