@@ -199,7 +199,7 @@ class GoPowerBondedAdapterSensor(CoordinatorEntity[GoPowerCoordinator], SensorEn
     """Local Bluetooth adapter holding the controller's bond (GP-SC only).
 
     BlueZ keeps a bond per adapter and only that adapter can talk to the
-    controller, so connections are pinned to it (see ble_pinning.py).  The
+    controller, so connections are pinned to it (see the ha-ble-pinning library).  The
     state is the adapter's MAC address; the hciN name can change between
     boots, so it is an attribute.
     """

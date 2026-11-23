@@ -29,7 +29,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .ble_pinning import pinned_client_class
+from ha_ble_pinning import pinned_client_class
 from .pairing_agent import just_works_agent
 from .const import (
     ADVERTISEMENT_WAIT,
@@ -209,7 +209,7 @@ class GoPowerCoordinator(DataUpdateCoordinator[GoPowerState | None]):
         # Local adapter actually carrying the current link (None = none, or a
         # proxy).  Read from BlueZ after connecting.
         self.link_adapter: str | None = None
-        # Adapters the last connect was restricted to (see ble_pinning.py).
+        # Adapters the last connect was restricted to (see the ha-ble-pinning library).
         self.pinned_adapters: frozenset[str] = frozenset()
 
         # Response assembly
