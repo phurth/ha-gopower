@@ -78,7 +78,7 @@ They remain visible in the integration's diagnostics output for protocol debuggi
 
 ## Requirements
 
-- Home Assistant 2024.1+ with Bluetooth integration
+- Home Assistant 2025.2+ with Bluetooth integration
 - Bluetooth adapter on the HA host (or ESPHome BT proxy for GP-PWM-30-SB; **local adapter required** for GP-PWM-30-UL pairing)
 - GoPower GP-PWM solar controller within BLE range
 
